@@ -1,4 +1,5 @@
 # ---------------- Datasets (too large / third-party license) ----------------
+notebooks/cleaned_improved_cicids2017.csv
 data/raw/
 data/processed/
 data/samples/
