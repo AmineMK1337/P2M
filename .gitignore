@@ -1,0 +1,31 @@
+# ---------------- Datasets (too large / third-party license) ----------------
+data/raw/
+data/processed/
+data/samples/
+data/streams/
+# Keep the data folder structure in git
+!data/.gitkeep
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/samples/.gitkeep
+!data/streams/.gitkeep
+
+# ---------------- Python ----------------
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+.venv/
+venv/
+env/
+
+# ---------------- Jupyter ----------------
+.ipynb_checkpoints/
+
+# ---------------- Logs / temp ----------------
+logs/
+*.log
+
+# ---------------- OS ----------------
+.DS_Store
+Thumbs.db

@@ -31,11 +31,25 @@ This agent analyzes suspicious traffic and identifies the type of attack, such a
 ### DDoS Prevention Agent
 This agent monitors traffic over time to detect DDoS attacks. When an attack is detected, it generates and applies mitigation strategies such as blocking IP addresses or rate-limiting traffic using firewall rules.
 
+## Datasets
+
+ANDS is trained and evaluated on the improved versions of two well-known network intrusion datasets.
+Raw dataset files are **not included** in this repository due to their size (~37 GB).
+
+Download them from Kaggle and place the extracted CSVs under `data/raw/`:
+
+| Dataset | Folder |
+|---|---|
+| Improved CICIDS2017 | `data/raw/CICIDS2017_improved/` |
+| Improved CSE-CIC-IDS2018 | `data/raw/CSECICIDS2018_improved/` |
+
+**Download link:** [Improved CICIDS2017 and CSE-CIC-IDS2018 on Kaggle](https://www.kaggle.com/datasets/ernie55ernie/improved-cicids2017-and-csecicids2018)
+
 ## Technologies
 - Python
 - Machine Learning and Deep Learning
 - Multi-Agent Frameworks (CrewAI, AutoGen)
-- Network Traffic Datasets (CIC-IDS2017)
+- Network Traffic Datasets (CIC-IDS2017, CSE-CIC-IDS2018)
 - Firewall or Router APIs
 
 ## Challenges
