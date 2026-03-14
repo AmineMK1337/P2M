@@ -59,8 +59,6 @@ Download them from Kaggle and place the extracted CSVs under `data/raw/`:
 - Integration with firewall systems
 
 ## Conclusion
-<<<<<<< HEAD
+
 ANDS represents a modern approach to cybersecurity by combining AI, multi-agent systems, and automation to build a self-defending network capable of responding to modern cyber threats in real time.
-=======
-ANDS represents a modern approach to cybersecurity by combining AI, multi-agent systems, and automation to build a self-defending network capable of responding to modern cyber threats in real time.
->>>>>>> 307c3fa6a9ba384d4025a72ce5c6ca1bc6a854be
+
