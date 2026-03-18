@@ -33,7 +33,39 @@ def _iter_csv(path: Path, source: str) -> Iterator[FlowRecord]:
     if not path.exists():
         raise FileNotFoundError(f"Flow input file not found: {path}")
 
-    df = pd.read_csv(path)
+    # Some captures are exported as Excel files but keep a .csv extension.
+    # XLSX files are ZIP containers and start with the PK signature.
+    with path.open("rb") as fh:
+        signature = fh.read(4)
+
+    if signature == b"PK\x03\x04":
+        df = pd.read_excel(path)
+        logger.warning("[ClassificationAgent] Input file is XLSX content with .csv name, loaded as Excel: %s", path)
+    else:
+        last_error: Optional[Exception] = None
+        for encoding in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
+            try:
+                df = pd.read_csv(path, encoding=encoding)
+                if encoding != "utf-8":
+                    logger.warning("[ClassificationAgent] Loaded CSV with fallback encoding '%s': %s", encoding, path)
+                break
+            except UnicodeDecodeError as exc:
+                last_error = exc
+            except pd.errors.ParserError:
+                # Fall back to delimiter auto-detection for irregular CSV exports.
+                try:
+                    df = pd.read_csv(path, encoding=encoding, sep=None, engine="python")
+                    logger.warning("[ClassificationAgent] Loaded CSV with auto-detected delimiter and encoding '%s': %s", encoding, path)
+                    break
+                except Exception as exc:
+                    last_error = exc
+        else:
+            raise ValueError(
+                "Could not parse input file as CSV. "
+                f"Tried encodings utf-8, utf-8-sig, cp1252, latin-1 and delimiter auto-detection: {path}. "
+                f"Last error: {last_error}"
+            )
+
     for _, row in df.iterrows():
         yield FlowRecord(features=row.to_dict(), source=source, raw_row=row)
 
