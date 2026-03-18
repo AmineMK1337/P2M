@@ -10,9 +10,14 @@ import argparse
 import logging
 from pathlib import Path
 
-from src.agents.classification_agent.agent import FlowInputConfig, DetectionClassificationAgent
-from src.agents.classification_agent.kibana_adapter import KibanaAdapter, KibanaConfig, StubKibanaAdapter
-from src.shared.schemas import ClassificationResult
+try:
+	from src.agents.classification_agent.agent import FlowInputConfig, DetectionClassificationAgent
+	from src.agents.classification_agent.kibana_adapter import KibanaAdapter, KibanaConfig, StubKibanaAdapter
+	from src.shared.schemas import ClassificationResult
+except ModuleNotFoundError:
+	from agents.classification_agent.agent import FlowInputConfig, DetectionClassificationAgent
+	from agents.classification_agent.kibana_adapter import KibanaAdapter, KibanaConfig, StubKibanaAdapter
+	from shared.schemas import ClassificationResult
 
 
 logging.basicConfig(

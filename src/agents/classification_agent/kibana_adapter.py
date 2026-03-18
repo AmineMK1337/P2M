@@ -9,7 +9,10 @@ from typing import Optional
 import importlib
 import logging
 
-from src.shared.schemas import SIEMAlert
+try:
+    from src.shared.schemas import SIEMAlert
+except ModuleNotFoundError:
+    from shared.schemas import SIEMAlert
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +22,7 @@ class KibanaConfig:
     host: str = "http://localhost:9200"
     index: str = "ands-alerts"
     username: Optional[str] = None
-    password: Optional[str] = None
+    password: Optional[str] = None 
     verify_certs: bool = False
     window_minutes: int = 10
     max_alerts: int = 50

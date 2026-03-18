@@ -12,8 +12,12 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from src.agents.classification_agent.kibana_adapter import KibanaAdapterBase
-from src.shared.schemas import ClassificationResult, FlowRecord
+try:
+    from src.agents.classification_agent.kibana_adapter import KibanaAdapterBase
+    from src.shared.schemas import ClassificationResult, FlowRecord
+except ModuleNotFoundError:
+    from agents.classification_agent.kibana_adapter import KibanaAdapterBase
+    from shared.schemas import ClassificationResult, FlowRecord
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +86,7 @@ class PCAIntrusionModel:
     def _anomaly_scores(original: np.ndarray, reconstructed: np.ndarray) -> np.ndarray:
         return np.sum((original - reconstructed) ** 2, axis=1)
 
-    def _prepare(self, flow: FlowRecord) -> np.ndarray:
+    def _prepare(self, flow: FlowRecord) -> pd.DataFrame:
         df = flow.to_dataframe()
 
         if self.feature_columns:
@@ -91,16 +95,16 @@ class PCAIntrusionModel:
                     df[col] = 0
             df = df[self.feature_columns]
 
-        df = df.apply(np.to_numeric, errors="coerce").fillna(0)
-        return df.values
+        df = df.apply(pd.to_numeric, errors="coerce").fillna(0)
+        return df
 
     def predict(self, flow: FlowRecord) -> tuple[str, float, float]:
         """
         Returns (attack_type, model_confidence, score).
         attack_type is BENIGN or Intrusion.
         """
-        X = self._prepare(flow)
-        x_scaled = self.scaler.transform(X)
+        X_df = self._prepare(flow)
+        x_scaled = self.scaler.transform(X_df)
         x_pca = self.pca.transform(x_scaled)
         x_reconstructed = self.pca.inverse_transform(x_pca)
         score = float(self._anomaly_scores(x_scaled, x_reconstructed)[0])
