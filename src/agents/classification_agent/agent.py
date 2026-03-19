@@ -99,7 +99,7 @@ class PCAIntrusionModel:
     - -1 means intrusion
     """
 
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, threshold_override: Optional[float] = None):
         self.model_path = Path(model_path)
         logger.info("[ClassificationAgent] Loading PCA bundle from %s", self.model_path)
         bundle = joblib.load(self.model_path)
@@ -111,7 +111,14 @@ class PCAIntrusionModel:
 
         self.scaler = bundle["scaler"]
         self.pca = bundle["pca"]
-        self.threshold = float(bundle["threshold"])
+        bundle_threshold = float(bundle["threshold"])
+        self.threshold = float(threshold_override) if threshold_override is not None else bundle_threshold
+        if threshold_override is not None:
+            logger.warning(
+                "[ClassificationAgent] Overriding model threshold from %.6f to %.6f",
+                bundle_threshold,
+                self.threshold,
+            )
         self.feature_columns = bundle.get("feature_columns")
 
     @staticmethod
@@ -175,34 +182,27 @@ class DetectionClassificationAgent:
         on_attack: Optional[Callable[[ClassificationResult], None]] = None,
         threshold: float = 0.5,
         kibana_window_minutes: int = 10,
+        model_threshold_override: Optional[float] = None,
+        push_benign_to_kibana: bool = False,
     ):
-        self.model = PCAIntrusionModel(model_path)
+        self.model = PCAIntrusionModel(model_path, threshold_override=model_threshold_override)
         self.kibana = kibana
         self.fusion = FusionEngine()
         self.on_attack = on_attack
         self.threshold = float(threshold)
         self.kibana_window_minutes = int(kibana_window_minutes)
+        self.push_benign_to_kibana = push_benign_to_kibana
 
     def process_flow(self, flow: FlowRecord) -> ClassificationResult:
         attack_type, model_conf, anomaly_score = self.model.predict(flow)
         model_flags_attack = attack_type != "BENIGN"
 
+        # Keep final verdict identical to model output (BENIGN vs Intrusion).
         siem_conf = 0.0
         siem_count = 0
-
-        if model_flags_attack and flow.src_ip:
-            alerts = self.kibana.get_alerts(
-                src_ip=flow.src_ip,
-                attack_type=attack_type,
-                window_minutes=self.kibana_window_minutes,
-            )
-            siem_count = len(alerts)
-            siem_conf = self.kibana.corroboration_score(alerts)
-        elif model_flags_attack and not flow.src_ip:
-            logger.warning("[ClassificationAgent] src_ip missing, skipping Kibana query.")
-
-        fused_conf, decision_source = self.fusion.fuse(model_conf, siem_conf, siem_count)
-        is_attack = model_flags_attack and (fused_conf >= self.threshold)
+        fused_conf = model_conf
+        decision_source = "model"
+        is_attack = model_flags_attack
 
         result = ClassificationResult(
             flow=flow,
@@ -221,7 +221,8 @@ class DetectionClassificationAgent:
         )
 
         self._log(result)
-        self.kibana.push_alert(result)
+        if result.is_attack or self.push_benign_to_kibana:
+            self.kibana.push_alert(result)
 
         if result.is_attack and self.on_attack:
             self.on_attack(result)

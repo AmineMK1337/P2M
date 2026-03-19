@@ -74,9 +74,37 @@ class KibanaAdapter(KibanaAdapterBase):
             self._client = Elasticsearch(self.config.host, **kwargs)
             info = self._client.info()
             logger.info("[Kibana] Connected to Elasticsearch: %s", info["version"]["number"])
+            self._ensure_index()
         except Exception as exc:
             logger.error("[Kibana] Connection failed: %s", exc)
             self._client = None
+
+    def _ensure_index(self):
+        if not self._client:
+            return
+
+        try:
+            exists = self._client.indices.exists(index=self.config.index)
+            if exists:
+                return
+
+            body = {
+                "mappings": {
+                    "properties": {
+                        "@timestamp": {"type": "date"},
+                        "src_ip": {"type": "keyword"},
+                        "attack_type": {"type": "keyword"},
+                        "confidence": {"type": "float"},
+                        "is_attack": {"type": "boolean"},
+                        "decision_source": {"type": "keyword"},
+                        "siem_alert_count": {"type": "integer"},
+                    }
+                }
+            }
+            self._client.indices.create(index=self.config.index, body=body)
+            logger.info("[Kibana] Created index: %s", self.config.index)
+        except Exception as exc:
+            logger.error("[Kibana] Failed to ensure index '%s': %s", self.config.index, exc)
 
     def get_alerts(self, src_ip: str, attack_type: str, window_minutes: int) -> list[SIEMAlert]:
         if not self._client:

@@ -13,3 +13,8 @@ shap==0.51.0
 
 # Utilities
 tqdm==4.67.3
+# Elasticsearch / Kibana integration
+elasticsearch==8.17.2
+
+# Excel input support (some flow files are XLSX content)
+openpyxl==3.1.5

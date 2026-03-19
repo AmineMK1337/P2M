@@ -8,6 +8,7 @@ Examples:
 
 import argparse
 import logging
+import os
 from pathlib import Path
 
 try:
@@ -46,11 +47,14 @@ def parse_args():
 	parser.add_argument("--csv", default="data/flows.csv")
 	parser.add_argument("--watch", default="data/cicflowmeter_out")
 	parser.add_argument("--model", default=_default_model_path())
+	parser.add_argument("--model-threshold", type=float, default=None, help="Override PCA anomaly threshold from model bundle")
 	parser.add_argument("--threshold", type=float, default=0.5)
-	parser.add_argument("--kibana-host", default=None, help="Elasticsearch host (omit to use stub)")
-	parser.add_argument("--kibana-index", default="ands-alerts", help="Elasticsearch index name")
-	parser.add_argument("--kibana-user", default=None)
-	parser.add_argument("--kibana-pass", default=None)
+	parser.add_argument("--kibana-host", default=os.getenv("KIBANA_HOST"), help="Elasticsearch host (omit to use stub)")
+	parser.add_argument("--kibana-index", default=os.getenv("KIBANA_INDEX", "ands-alerts"), help="Elasticsearch index name")
+	parser.add_argument("--kibana-user", default=os.getenv("KIBANA_USER"))
+	parser.add_argument("--kibana-pass", default=os.getenv("KIBANA_PASS"))
+	parser.add_argument("--kibana-verify-certs", action="store_true", default=os.getenv("KIBANA_VERIFY_CERTS", "0") in {"1", "true", "True"}, help="Enable TLS certificate verification")
+	parser.add_argument("--kibana-save-all", action="store_true", default=False, help="Save both benign and attack flows to Kibana (default saves attacks only)")
 	parser.add_argument("--window", type=int, default=10, help="SIEM look-back window (minutes)")
 	return parser.parse_args()
 
@@ -65,10 +69,11 @@ def main():
 				index=args.kibana_index,
 				username=args.kibana_user,
 				password=args.kibana_pass,
+				verify_certs=args.kibana_verify_certs,
 			)
 		)
 	else:
-		print("[main] No --kibana-host provided, using StubKibanaAdapter.")
+		print("[main] No Kibana host configured, using StubKibanaAdapter.")
 		kibana = StubKibanaAdapter()
 
 	input_config = FlowInputConfig(
@@ -83,6 +88,8 @@ def main():
 		on_attack=forward_to_agent3,
 		threshold=args.threshold,
 		kibana_window_minutes=args.window,
+		model_threshold_override=args.model_threshold,
+		push_benign_to_kibana=args.kibana_save_all,
 	)
 
 	agent.run(input_config)
