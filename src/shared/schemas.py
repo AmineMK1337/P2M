@@ -53,3 +53,31 @@ class ClassificationResult:
     decision_source: str
     agent: str = "DetectionClassificationAgent"
     metadata: dict[str, Any] = field(default_factory=dict)
+    severity: str = "medium"
+    mitigation_actions: list[str] = field(default_factory=list)
+    mitigated: bool = False
+    mitigation_status: str = "pending"
+
+    @property
+    def src_ip(self) -> str:
+        """Convenience accessor for mitigation consumers."""
+        return self.flow.src_ip or "unknown"
+
+    @property
+    def mitigation_attack_type(self) -> str:
+        """Canonical attack type key used by mitigation strategy maps."""
+        attack = (self.attack_type or "").strip().lower()
+        aliases = {
+            "intrusion": "DDoS",
+            "ddos": "DDoS",
+            "portscan": "PortScan",
+            "port scan": "PortScan",
+            "bruteforce": "BruteForce",
+            "brute force": "BruteForce",
+            "botnet": "Botnet",
+            "web attack": "Web Attack",
+            "webattack": "Web Attack",
+            "infiltration": "Infiltration",
+            "benign": "BENIGN",
+        }
+        return aliases.get(attack, self.attack_type)
