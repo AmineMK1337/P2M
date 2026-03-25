@@ -6,30 +6,34 @@ The Adaptive Network Defense System (ANDS) is an AI-powered cybersecurity platfo
 ANDS uses a Multi-Agent System (MAS) where several AI agents cooperate to monitor network traffic, detect anomalies, identify attack types, and apply mitigation strategies without human intervention.
 
 ## Objectives
-- Monitor network traffic continuously
-- Detect known and unknown (zero-day) threats
-- Classify different types of cyberattacks
-- Automatically mitigate attacks such as DDoS
-- Reduce detection and response time
+- Monitor and extract features from network traffic in real time
+- Detect and classify different types of cyberattacks using ML-backed detection
+- Cross-correlate detections with historical data to reduce false positives  
+- Automatically apply mitigation strategies (IP blocking, rate limiting, etc.)
+- Reduce detection latency and response time to near-real-time speeds
 
 ## System Architecture
-ANDS is built using a Multi-Agent System composed of three specialized agents:
-1. Flow Analysis Agent
-2. Intrusion Classification Agent
-3. DDoS Prevention Agent
+ANDS is built using a Multi-Agent System composed of two specialized agents:
+1. **Classification Agent** — Detects and classifies attacks
+2. **Mitigation Agent** — Applies automated responses
 
-Network traffic passes through these agents in sequence: anomaly detection, attack classification, and mitigation.
+Network traffic passes through these agents in sequence: attack detection & classification, followed by automated mitigation.
 
 ## Core Agents
 
-### Flow Analysis Agent
-This agent learns what normal network traffic looks like and detects deviations using unsupervised machine learning techniques such as Isolation Forests or Autoencoders. It can detect unknown or zero-day attacks.
+### Classification Agent (Fused Detection + Classification)
+This agent performs both detection and classification of attacks in real time:
+- Uses a trained machine learning model to classify network flows and determine attack types
+- Correlates detections with historical alert data from Kibana to reduce false positives
+- Combines model confidence with behavioral history for robust decision-making
+- Outputs a **ClassificationResult** with attack type, confidence score, and source IP
 
-### Intrusion Classification Agent
-This agent analyzes suspicious traffic and identifies the type of attack, such as DDoS, port scanning, or malware communication. It uses supervised learning models trained on datasets like CIC-IDS2017.
-
-### DDoS Prevention Agent
-This agent monitors traffic over time to detect DDoS attacks. When an attack is detected, it generates and applies mitigation strategies such as blocking IP addresses or rate-limiting traffic using firewall rules.
+### Mitigation Agent
+This agent receives confirmed attack classifications and applies automated mitigation strategies:
+- Currently focused on DDoS mitigation by blocking source IPs
+- Applies firewall rules (iptables) on the target system to prevent further attacks
+- Works idempotently — applying the same block twice has no adverse effects
+- Can be extended to support additional mitigation types (rate limiting, traffic shaping, etc.)
 
 ## Datasets
 
