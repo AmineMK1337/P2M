@@ -16,5 +16,13 @@ tqdm==4.67.3
 # Elasticsearch / Kibana integration
 elasticsearch==8.17.2
 
+# Agent and mitigation stack
+langchain-core==0.3.72
+langgraph==0.6.6
+langchain-ollama==0.2.1
+
+# Packet tooling for CICFlowMeter tests
+scapy==2.6.1
+
 # Excel input support (some flow files are XLSX content)
 openpyxl==3.1.5

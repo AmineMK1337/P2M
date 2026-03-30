@@ -9,9 +9,9 @@ import numpy as np
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
+sys.path.insert(0, str(PROJECT_ROOT))
 
-from models.pca_detector import load_model  # noqa: E402
+from src.models.pca_detector import load_model  # noqa: E402
 
 
 LABEL_CANDIDATES = ["Label", "label", "Attack", "attack", "Class", "class"]
