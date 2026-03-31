@@ -19,6 +19,8 @@ ANDS is built using a Multi-Agent System composed of two specialized agents:
 
 Network traffic passes through these agents in sequence: attack detection & classification, followed by automated mitigation.
 
+![ANDS System Architecture](diagram.png)
+
 ## Core Agents
 
 ### Classification Agent (Fused Detection + Classification)
