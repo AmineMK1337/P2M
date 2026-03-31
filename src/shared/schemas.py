@@ -57,6 +57,11 @@ class ClassificationResult:
     mitigation_actions: list[str] = field(default_factory=list)
     mitigated: bool = False
     mitigation_status: str = "pending"
+    
+    # Reasoning and acting fields
+    reasoning: str = ""  # Explanation of why this decision was made
+    recommended_actions: list[str] = field(default_factory=list)  # Recommended mitigations
+    reasoning_details: dict[str, Any] = field(default_factory=dict)  # Detailed reasoning breakdown
 
     @property
     def src_ip(self) -> str:

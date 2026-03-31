@@ -172,6 +172,122 @@ class FusionEngine:
         return siem_confidence, "siem"
 
 
+class ReasoningEngine:
+    """Generates human-readable reasoning for classification decisions."""
+
+    @staticmethod
+    def generate_reasoning(
+        is_attack: bool,
+        attack_type: str,
+        confidence: float,
+        model_confidence: float,
+        siem_confidence: float,
+        siem_alert_count: int,
+        anomaly_score: float,
+        threshold: float,
+        decision_source: str,
+    ) -> tuple[str, dict[str, Any]]:
+        """
+        Generates a reasoning explanation and detailed breakdown.
+        Returns (reasoning_text, reasoning_details_dict).
+        """
+        details: dict[str, Any] = {
+            "decision": "attack" if is_attack else "benign",
+            "confidence_score": round(confidence, 3),
+            "decision_source": decision_source,
+        }
+
+        if is_attack:
+            if decision_source == "model":
+                reasoning = (
+                    f"Classified as {attack_type} (confidence: {confidence:.1%}) based on PCA anomaly detection. "
+                    f"Anomaly score {anomaly_score:.4f} exceeds threshold {threshold:.4f} by "
+                    f"{((anomaly_score - threshold) / threshold * 100):.1f}%, indicating behavioral deviation from normal traffic."
+                )
+                details["anomaly_breakdown"] = {
+                    "score": round(anomaly_score, 4),
+                    "threshold": round(threshold, 4),
+                    "deviation_percent": round(((anomaly_score - threshold) / threshold * 100), 1),
+                }
+            elif decision_source == "model+siem":
+                reasoning = (
+                    f"Classified as {attack_type} (confidence: {confidence:.1%}). "
+                    f"Model signals attack with {model_confidence:.1%} confidence (anomaly score: {anomaly_score:.4f}). "
+                    f"SIEM corroborates with {siem_alert_count} recent alert(s) matching this attack type and source ({siem_confidence:.1%} confidence)."
+                )
+                details["model_signal"] = round(model_confidence, 3)
+                details["siem_signal"] = {
+                    "confidence": round(siem_confidence, 3),
+                    "recent_alerts": siem_alert_count,
+                }
+            else:  # "siem"
+                reasoning = (
+                    f"Re-classified as {attack_type} based on SIEM historical context ({siem_confidence:.1%} confidence, {siem_alert_count} recent alerts). "
+                    f"Model had lower confidence, but SIEM history shows this source repeatedly flagged for same attack type."
+                )
+                details["siem_override"] = {
+                    "confidence": round(siem_confidence, 3),
+                    "alert_count": siem_alert_count,
+                }
+        else:
+            reasoning = (
+                f"Classified as {attack_type} (confidence: {confidence:.1%}). "
+                f"Anomaly score {anomaly_score:.4f} is within normal range (threshold: {threshold:.4f}). "
+                f"Traffic patterns are consistent with benign network activity."
+            )
+            details["anomaly_breakdown"] = {
+                "score": round(anomaly_score, 4),
+                "threshold": round(threshold, 4),
+                "margin_to_threshold": round((threshold - anomaly_score), 4),
+            }
+
+        return reasoning, details
+
+    @staticmethod
+    def recommend_actions(is_attack: bool, attack_type: str, confidence: float) -> list[str]:
+        """
+        Suggests mitigation actions based on classification result.
+        """
+        actions: list[str] = []
+
+        if not is_attack:
+            return ["monitor_only"]
+
+        # High confidence attacks — take immediate action
+        if confidence >= 0.75:
+            actions.append("block_immediately")
+            actions.append("log_for_investigation")
+        elif confidence >= 0.6:
+            actions.append("rate_limit")
+            actions.append("log_for_investigation")
+        else:
+            actions.append("monitor_closely")
+            actions.append("log_for_investigation")
+
+        # Attack-specific recommendations
+        attack_lower = (attack_type or "").lower().strip()
+        if "ddos" in attack_lower or "syn" in attack_lower:
+            actions.append("enable_syn_flood_protection")
+            actions.append("increase_connection_limits")
+        elif "portscan" in attack_lower or "port scan" in attack_lower:
+            actions.append("block_scanner")
+            actions.append("enable_port_scanning_alerts")
+        elif "bruteforce" in attack_lower or "brute force" in attack_lower:
+            actions.append("enforce_rate_limiting_on_auth")
+            actions.append("enable_account_lockout")
+        elif "web attack" in attack_lower:
+            actions.append("enable_waf")
+            actions.append("sanitize_inputs")
+        elif "botnet" in attack_lower:
+            actions.append("block_permanently")
+            actions.append("threat_intelligence_update")
+        elif "infiltration" in attack_lower:
+            actions.append("isolate_host")
+            actions.append("enable_full_packet_capture")
+
+        return actions
+
+
 class DetectionClassificationAgent:
     """Unified classification agent that ingests flows and performs fused decisions."""
 
@@ -188,6 +304,7 @@ class DetectionClassificationAgent:
         self.model = PCAIntrusionModel(model_path, threshold_override=model_threshold_override)
         self.kibana = kibana
         self.fusion = FusionEngine()
+        self.reasoning = ReasoningEngine()
         self.on_attack = on_attack
         self.threshold = float(threshold)
         self.kibana_window_minutes = int(kibana_window_minutes)
@@ -204,6 +321,26 @@ class DetectionClassificationAgent:
         decision_source = "model"
         is_attack = model_flags_attack
 
+        # Generate reasoning
+        reasoning_text, reasoning_details = self.reasoning.generate_reasoning(
+            is_attack=is_attack,
+            attack_type=attack_type if is_attack else "BENIGN",
+            confidence=fused_conf,
+            model_confidence=model_conf,
+            siem_confidence=siem_conf,
+            siem_alert_count=siem_count,
+            anomaly_score=anomaly_score,
+            threshold=self.model.threshold,
+            decision_source=decision_source,
+        )
+
+        # Generate recommended actions
+        recommended_actions = self.reasoning.recommend_actions(
+            is_attack=is_attack,
+            attack_type=attack_type if is_attack else "BENIGN",
+            confidence=fused_conf,
+        )
+
         result = ClassificationResult(
             flow=flow,
             is_attack=is_attack,
@@ -213,6 +350,9 @@ class DetectionClassificationAgent:
             siem_confidence=siem_conf,
             siem_alert_count=siem_count,
             decision_source=decision_source,
+            reasoning=reasoning_text,
+            recommended_actions=recommended_actions,
+            reasoning_details=reasoning_details,
             metadata={
                 "threshold": self.threshold,
                 "model_threshold": self.model.threshold,
@@ -240,7 +380,9 @@ class DetectionClassificationAgent:
     def _log(self, result: ClassificationResult):
         if result.is_attack:
             logger.warning(
-                "[ClassificationAgent] ATTACK type=%s fused=%.3f model=%.3f siem=%.3f alerts=%s source=%s ip=%s",
+                "[ClassificationAgent] ATTACK type=%s fused=%.3f model=%.3f siem=%.3f alerts=%s source=%s ip=%s\n"
+                "  Reasoning: %s\n"
+                "  Recommended Actions: %s",
                 result.attack_type,
                 result.confidence,
                 result.model_confidence,
@@ -248,9 +390,16 @@ class DetectionClassificationAgent:
                 result.siem_alert_count,
                 result.decision_source,
                 result.flow.src_ip,
+                result.reasoning,
+                ", ".join(result.recommended_actions),
             )
         else:
-            logger.info("[ClassificationAgent] BENIGN conf=%.3f ip=%s", result.confidence, result.flow.src_ip)
+            logger.info(
+                "[ClassificationAgent] BENIGN conf=%.3f ip=%s\n  Reasoning: %s",
+                result.confidence,
+                result.flow.src_ip,
+                result.reasoning,
+            )
 
     @staticmethod
     def _print_summary(results: list[ClassificationResult]):
