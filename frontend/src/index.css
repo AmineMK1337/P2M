@@ -1,0 +1,108 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  --bg-0: #04060b;
+  --bg-1: #090f19;
+  --bg-2: #0e1828;
+  --ok: #1ed6a6;
+  --info: #3bc4ff;
+  --warn: #ffc857;
+  --danger: #ff5d73;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: "Space Grotesk", sans-serif;
+  background: radial-gradient(circle at 15% 15%, rgba(59, 196, 255, 0.14), transparent 36%),
+    radial-gradient(circle at 78% 8%, rgba(30, 214, 166, 0.1), transparent 38%),
+    linear-gradient(185deg, var(--bg-0), var(--bg-1) 52%, var(--bg-2));
+  color: #e6edf8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+.glass-panel {
+  border: 1px solid rgba(131, 148, 175, 0.2);
+  background: linear-gradient(145deg, rgba(20, 28, 40, 0.82), rgba(10, 15, 24, 0.82));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 16px 42px rgba(0, 0, 0, 0.34);
+  backdrop-filter: blur(12px);
+}
+
+.status-pill {
+  border: 1px solid rgba(131, 148, 175, 0.35);
+  border-radius: 9999px;
+  padding: 0.2rem 0.65rem;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.72rem;
+  color: #d7e3f2;
+  background: rgba(15, 23, 37, 0.65);
+}
+
+.status-ok {
+  border-color: color-mix(in srgb, var(--ok) 55%, transparent);
+  color: var(--ok);
+}
+
+.status-warn {
+  border-color: color-mix(in srgb, var(--warn) 55%, transparent);
+  color: var(--warn);
+}
+
+.status-danger {
+  border-color: color-mix(in srgb, var(--danger) 58%, transparent);
+  color: var(--danger);
+  box-shadow: 0 0 0 0 rgba(255, 93, 115, 0.45);
+  animation: alertPulse 1.35s infinite;
+}
+
+.metric-value {
+  font-family: "Space Grotesk", sans-serif;
+  font-weight: 700;
+  letter-spacing: 0.015em;
+}
+
+.text-neon-ok {
+  color: var(--ok);
+}
+
+.text-neon-info {
+  color: var(--info);
+}
+
+.text-neon-danger {
+  color: var(--danger);
+}
+
+@keyframes alertPulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 93, 115, 0.5);
+  }
+  80% {
+    box-shadow: 0 0 0 14px rgba(255, 93, 115, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 93, 115, 0);
+  }
+}
+
+.grid-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: linear-gradient(rgba(110, 145, 184, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(110, 145, 184, 0.08) 1px, transparent 1px);
+  background-size: 38px 38px;
+  mask-image: radial-gradient(ellipse at center, black 42%, transparent 90%);
+  opacity: 0.45;
+}
