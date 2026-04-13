@@ -28,7 +28,7 @@ class _FakeModel:
 
 
 def test_get_flow_stream_csv_mode_reads_rows(tmp_path):
-    csv_file = tmp_path / "flows.csv"
+    csv_file = tmp_path / "test.csv"
     csv_file.write_text("Src IP,Flow Duration\n1.2.3.4,123\n5.6.7.8,456\n", encoding="utf-8")
 
     config = FlowInputConfig(mode="csv", csv_path=str(csv_file))

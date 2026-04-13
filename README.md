@@ -64,6 +64,38 @@ Download them from Kaggle and place the extracted CSVs under `data/raw/`:
 - Avoiding false positives
 - Integration with firewall systems
 
+## Test Classification Agent
+
+Run the classification agent on the sample test file (`data/test/test.csv`) with:
+
+```bash
+python -m src.main --mode csv --csv data/test/test.csv
+```
+
+Run the classification agent unit test suite with:
+
+```bash
+python -m pytest tests/test_intrusion_classification_agent.py -v
+```
+
+To see printed output and full details in the terminal:
+
+```bash
+python -m pytest tests/test_intrusion_classification_agent.py -v -s
+```
+
+Optional: save the output to a log file:
+
+```bash
+python -m pytest tests/test_intrusion_classification_agent.py -v -s > logs/test_output.txt
+```
+
+How to read results:
+- `PASSED` means the test succeeded
+- `FAILED` means at least one assertion failed
+- Exit code `0` means all tests passed
+- Exit code `1` means one or more tests failed
+
 ## Conclusion
 
 ANDS represents a modern approach to cybersecurity by combining AI, multi-agent systems, and automation to build a self-defending network capable of responding to modern cyber threats in real time.
