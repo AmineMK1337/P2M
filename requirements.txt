@@ -26,3 +26,8 @@ scapy==2.6.1
 
 # Excel input support (some flow files are XLSX content)
 openpyxl==3.1.5
+
+# Web API Backend
+fastapi>=0.100.0
+uvicorn>=0.23.0
+
