@@ -1,7 +1,9 @@
 """Tests for the current ANDS classification agent implementation."""
 
 from pathlib import Path
+import json
 
+import numpy as np
 import pytest
 
 import src.agents.classification_agent.agent as classification_module
@@ -12,7 +14,28 @@ from src.agents.classification_agent.agent import (
     get_flow_stream,
 )
 from src.agents.classification_agent.kibana_adapter import StubKibanaAdapter
-from src.shared.schemas import FlowRecord
+from src.shared.schemas import ClassificationResult, FlowRecord
+
+
+class _IdentityScaler:
+    def transform(self, x):
+        return np.asarray(x, dtype=float)
+
+
+class _ProjectionPCA:
+    def transform(self, x):
+        return np.asarray(x, dtype=float)
+
+    def inverse_transform(self, x):
+        # Force non-zero reconstruction error so test samples are attacks.
+        return np.zeros_like(np.asarray(x, dtype=float))
+
+
+class _AttackTypeModel:
+    feature_names_in_ = np.array(["Flow Duration"], dtype=object)
+
+    def predict(self, _x):
+        return np.array(["DDoS"], dtype=object)
 
 
 class _FakeModel:
@@ -129,3 +152,132 @@ def test_run_processes_all_flows(monkeypatch, tmp_path):
 
     assert len(results) == 2
     assert sum(1 for r in results if r.is_attack) == 1
+
+
+def test_pca_intrusion_model_returns_specific_attack_type_from_bundle_model(monkeypatch):
+    bundle = {
+        "scaler": _IdentityScaler(),
+        "pca": _ProjectionPCA(),
+        "threshold": 0.5,
+        "feature_columns": ["Flow Duration"],
+        "attack_type_model": _AttackTypeModel(),
+    }
+    monkeypatch.setattr(classification_module.joblib, "load", lambda _path: bundle)
+
+    model = classification_module.PCAIntrusionModel("unused.joblib")
+    attack_type, confidence, score = model.predict(
+        FlowRecord(features={"Flow Duration": 2.0}, source="test")
+    )
+
+    assert attack_type == "DDoS"
+    assert score > model.threshold
+    assert 0.5 <= confidence <= 1.0
+
+
+def test_pca_intrusion_model_falls_back_to_flow_label_for_attack_type(monkeypatch):
+    bundle = {
+        "scaler": _IdentityScaler(),
+        "pca": _ProjectionPCA(),
+        "threshold": 0.5,
+        "feature_columns": ["Flow Duration"],
+    }
+    monkeypatch.setattr(classification_module.joblib, "load", lambda _path: bundle)
+
+    model = classification_module.PCAIntrusionModel("unused.joblib")
+    attack_type, _, _ = model.predict(
+        FlowRecord(features={"Flow Duration": 2.0, "Label": "PortScan"}, source="test")
+    )
+
+    assert attack_type == "PortScan"
+
+
+def test_pca_intrusion_model_uses_attack_type_centroids(monkeypatch):
+    bundle = {
+        "scaler": _IdentityScaler(),
+        "pca": _ProjectionPCA(),
+        "threshold": 0.5,
+        "feature_columns": ["Flow Duration"],
+        "attack_type_centroids": {
+            "DDoS": [10.0],
+            "PortScan": [2.0],
+        },
+    }
+    monkeypatch.setattr(classification_module.joblib, "load", lambda _path: bundle)
+
+    model = classification_module.PCAIntrusionModel("unused.joblib")
+    attack_type, _, _ = model.predict(
+        FlowRecord(features={"Flow Duration": 2.0}, source="test")
+    )
+
+    assert attack_type == "PortScan"
+
+def test_pca_intrusion_model_loads_centroids_from_sidecar(monkeypatch, tmp_path):
+    model_path = tmp_path / "pca_intrusion_detector.joblib"
+    model_path.write_bytes(b"stub")
+
+    sidecar_path = model_path.with_suffix(".attack_type_centroids.json")
+    sidecar_payload = {
+        "attack_type_centroids": {
+            "DDoS": [10.0],
+            "PortScan": [2.0],
+        },
+        "attack_classes": ["DDoS", "PortScan"],
+    }
+    sidecar_path.write_text(json.dumps(sidecar_payload), encoding="utf-8")
+
+    bundle = {
+        "scaler": _IdentityScaler(),
+        "pca": _ProjectionPCA(),
+        "threshold": 0.5,
+        "feature_columns": ["Flow Duration"],
+    }
+    monkeypatch.setattr(classification_module.joblib, "load", lambda _path: bundle)
+
+    model = classification_module.PCAIntrusionModel(str(model_path))
+    attack_type, _, _ = model.predict(
+        FlowRecord(features={"Flow Duration": 2.0}, source="test")
+    )
+
+    assert attack_type == "PortScan"
+
+
+def test_print_summary_includes_attack_type_ip_associations(capsys):
+    results = [
+        ClassificationResult(
+            flow=FlowRecord(features={"Src IP": "10.0.0.1"}, source="test"),
+            is_attack=True,
+            attack_type="DDoS",
+            confidence=0.99,
+            model_confidence=0.99,
+            siem_confidence=0.0,
+            siem_alert_count=0,
+            decision_source="model",
+        ),
+        ClassificationResult(
+            flow=FlowRecord(features={"Src IP": "10.0.0.2"}, source="test"),
+            is_attack=True,
+            attack_type="PortScan",
+            confidence=0.91,
+            model_confidence=0.91,
+            siem_confidence=0.0,
+            siem_alert_count=0,
+            decision_source="model",
+        ),
+        ClassificationResult(
+            flow=FlowRecord(features={"Src IP": "192.168.1.5"}, source="test"),
+            is_attack=False,
+            attack_type="BENIGN",
+            confidence=0.85,
+            model_confidence=0.85,
+            siem_confidence=0.0,
+            siem_alert_count=0,
+            decision_source="model",
+        ),
+    ]
+
+    DetectionClassificationAgent._print_summary(results)
+    out = capsys.readouterr().out
+
+    assert "Attack Type -> Source IP(s)" in out
+    assert "DDoS" in out and "10.0.0.1" in out
+    assert "PortScan" in out and "10.0.0.2" in out

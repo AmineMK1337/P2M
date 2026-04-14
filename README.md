@@ -66,28 +66,96 @@ Download them from Kaggle and place the extracted CSVs under `data/raw/`:
 
 ## Test Classification Agent
 
-Run the classification agent on the sample test file (`data/test/test.csv`) with:
+The commands below were validated in this workspace on Windows using the project virtual environment.
+
+### 1) Run classification on sample CSV input
+
+This runs the classification pipeline on `data/test/test.csv` and prints predictions in the terminal.
 
 ```bash
 python -m src.main --mode csv --csv data/test/test.csv
 ```
 
-Run the classification agent unit test suite with:
+Windows (venv) equivalent:
+
+```powershell
+& ".\.venv\Scripts\python.exe" -m src.main --mode csv --csv data/test/test.csv
+```
+
+Expected behavior:
+- Benign flows are reported as `BENIGN`
+- Attack flows are reported with specific attack types (for example: `DDoS`, `PortScan`, `WebAttack`)
+
+### 2) Run classification-agent unit tests
+
+Run the test suite with:
 
 ```bash
 python -m pytest tests/test_intrusion_classification_agent.py -v
 ```
 
-To see printed output and full details in the terminal:
+Windows (venv) equivalent:
+
+```powershell
+& ".\.venv\Scripts\python.exe" -m pytest tests/test_intrusion_classification_agent.py -v
+```
+
+Current expected result in this repo:
+- `11 passed`
+- Exit code `0`
+
+### 3) Optional: print all test output
 
 ```bash
 python -m pytest tests/test_intrusion_classification_agent.py -v -s
 ```
 
-Optional: save the output to a log file:
+Windows (venv) equivalent:
+
+```powershell
+& ".\.venv\Scripts\python.exe" -m pytest tests/test_intrusion_classification_agent.py -v -s
+```
+
+### 4) Optional: save test output to a log file
 
 ```bash
 python -m pytest tests/test_intrusion_classification_agent.py -v -s > logs/test_output.txt
+```
+
+Windows (venv) equivalent:
+
+```powershell
+& ".\.venv\Scripts\python.exe" -m pytest tests/test_intrusion_classification_agent.py -v -s > logs/test_output.txt
+```
+
+### 5) Optional: regenerate attack-type centroids in the PCA model bundle
+
+If you retrain/rebuild data artifacts and want attack-type fallback metadata in
+`deployments/models/pca_intrusion_detector.joblib`, run:
+
+```bash
+python scripts/build_attack_type_centroids.py --model deployments/models/pca_intrusion_detector.joblib
+```
+
+Windows (venv) equivalent:
+
+```powershell
+& ".\.venv\Scripts\python.exe" scripts/build_attack_type_centroids.py --model deployments/models/pca_intrusion_detector.joblib
+```
+
+Notes:
+- This command creates a backup file: `deployments/models/pca_intrusion_detector.joblib.bak`
+- The updated bundle includes `attack_type_centroids` and `attack_classes`
+- A sidecar file is also written: `deployments/models/pca_intrusion_detector.attack_type_centroids.json`
+
+Troubleshooting (if attacks show as `Intrusion` instead of specific types):
+- Confirm you are loading the expected model path from logs.
+- Regenerate centroid metadata with the command above.
+- Ensure `deployments/models/pca_intrusion_detector.attack_type_centroids.json` exists.
+- Re-run with the project venv Python:
+
+```powershell
+& ".\.venv\Scripts\python.exe" -m src.main --mode csv --csv data/test/test.csv
 ```
 
 How to read results:

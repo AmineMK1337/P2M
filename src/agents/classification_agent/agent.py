@@ -4,8 +4,9 @@ Combines flow ingestion (former agent1) and fused decision logic.
 """
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
-from typing import Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional
 import logging
 
 import joblib
@@ -121,6 +122,202 @@ class PCAIntrusionModel:
             )
         self.feature_columns = bundle.get("feature_columns")
 
+        # Optional attack-type metadata for multi-class outputs.
+        self.attack_type_model = (
+            bundle.get("attack_type_model")
+            or bundle.get("attack_classifier")
+            or bundle.get("classifier")
+            or bundle.get("multiclass_model")
+        )
+        self.attack_type_label_encoder = bundle.get("attack_label_encoder") or bundle.get("label_encoder")
+
+        raw_attack_classes = bundle.get("attack_classes") or bundle.get("class_names") or bundle.get("classes")
+        self.attack_classes = [str(value) for value in raw_attack_classes] if raw_attack_classes else None
+
+        self.attack_type_centroids = self._normalize_centroids(bundle.get("attack_type_centroids"))
+        if not self.attack_type_centroids:
+            self.attack_type_centroids = self._load_attack_type_centroids_from_sidecar()
+
+        if self.attack_type_model is not None:
+            logger.info("[ClassificationAgent] Attack typing source: bundle multi-class model")
+        elif self.attack_type_centroids:
+            class_count = len(self.attack_type_centroids)
+            logger.info("[ClassificationAgent] Attack typing source: centroids (%d classes)", class_count)
+        else:
+            logger.warning(
+                "[ClassificationAgent] No attack-type metadata found (model=%s). "
+                "Attacks will fallback to generic 'Intrusion' unless input rows contain labels.",
+                self.model_path,
+            )
+
+    @staticmethod
+    def _normalize_centroids(raw_centroids: Any) -> Optional[dict[str, np.ndarray]]:
+        if not isinstance(raw_centroids, dict):
+            return None
+
+        normalized: dict[str, np.ndarray] = {}
+        for attack_name, vector in raw_centroids.items():
+            if vector is None:
+                continue
+            arr = np.asarray(vector, dtype=float).reshape(-1)
+            if arr.size > 0:
+                normalized[str(attack_name)] = arr
+
+        return normalized or None
+
+    def _load_attack_type_centroids_from_sidecar(self) -> Optional[dict[str, np.ndarray]]:
+        candidates = [
+            self.model_path.with_suffix(".attack_type_centroids.json"),
+            self.model_path.parent / "pca_intrusion_detector.attack_type_centroids.json",
+            self.model_path.parent / "attack_type_centroids.json",
+        ]
+
+        if self.model_path.name.endswith(".joblib.bak"):
+            original_model = self.model_path.with_name(self.model_path.name[:-4])
+            candidates.insert(1, original_model.with_suffix(".attack_type_centroids.json"))
+
+        seen: set[Path] = set()
+        for path in candidates:
+            if path in seen:
+                continue
+            seen.add(path)
+
+            if not path.exists():
+                continue
+
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                logger.warning("[ClassificationAgent] Failed reading centroid sidecar %s: %s", path, exc)
+                continue
+
+            raw_centroids: Any = payload
+            if isinstance(payload, dict) and "attack_type_centroids" in payload:
+                raw_centroids = payload.get("attack_type_centroids")
+
+            normalized = self._normalize_centroids(raw_centroids)
+            if normalized:
+                logger.info("[ClassificationAgent] Loaded attack-type centroids from sidecar %s", path)
+                return normalized
+
+            logger.warning("[ClassificationAgent] Sidecar %s did not contain valid attack_type_centroids", path)
+
+        return None
+
+    @staticmethod
+    def _is_benign_label(label: Any) -> bool:
+        text = str(label).strip().lower()
+        return text in {"benign", "normal", "inlier", "1", "0"}
+
+    @staticmethod
+    def _extract_flow_attack_label(flow: FlowRecord) -> Optional[str]:
+        keys = (
+            "Label",
+            "label",
+            "attack_type",
+            "attackType",
+            "AttackType",
+            "attack",
+            "Attack",
+            "Class",
+            "class",
+            "Category",
+            "category",
+        )
+        for key in keys:
+            value = flow.features.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return None
+
+    def _predict_attack_type_with_model(self, x_df: pd.DataFrame, x_scaled: np.ndarray) -> Optional[str]:
+        model = self.attack_type_model
+        if model is None or not hasattr(model, "predict"):
+            return None
+
+        # Try to align to model feature expectations if available.
+        model_input: Any = x_df
+        n_features = getattr(model, "n_features_in_", None)
+        model_feature_names = getattr(model, "feature_names_in_", None)
+
+        if model_feature_names is not None:
+            cols = [str(c) for c in model_feature_names]
+            aligned = x_df.copy()
+            for col in cols:
+                if col not in aligned.columns:
+                    aligned[col] = 0
+            model_input = aligned[cols]
+        elif isinstance(n_features, int) and n_features == x_scaled.shape[1]:
+            model_input = x_scaled
+
+        try:
+            pred = model.predict(model_input)
+        except Exception:
+            return None
+
+        if pred is None or len(pred) == 0:
+            return None
+
+        value: Any = pred[0]
+
+        if self.attack_type_label_encoder is not None:
+            try:
+                decoded = self.attack_type_label_encoder.inverse_transform([value])[0]
+                value = decoded
+            except Exception:
+                pass
+
+        if self.attack_classes and isinstance(value, (int, np.integer)):
+            idx = int(value)
+            if 0 <= idx < len(self.attack_classes):
+                value = self.attack_classes[idx]
+
+        label = str(value).strip()
+        if not label or self._is_benign_label(label):
+            return None
+        return label
+
+    def _predict_attack_type_with_centroids(self, x_scaled: np.ndarray) -> Optional[str]:
+        if not self.attack_type_centroids:
+            return None
+
+        sample = np.asarray(x_scaled, dtype=float).reshape(-1)
+        best_name: Optional[str] = None
+        best_distance: Optional[float] = None
+
+        for attack_name, centroid in self.attack_type_centroids.items():
+            if centroid.shape[0] != sample.shape[0]:
+                continue
+            distance = float(np.linalg.norm(sample - centroid))
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                best_name = attack_name
+
+        if best_name is None or self._is_benign_label(best_name):
+            return None
+        return best_name
+
+    def _predict_attack_type(self, flow: FlowRecord, x_df: pd.DataFrame, x_scaled: np.ndarray) -> str:
+        # Preferred source: dedicated multi-class model from bundle.
+        model_attack_type = self._predict_attack_type_with_model(x_df=x_df, x_scaled=x_scaled)
+        if model_attack_type:
+            return model_attack_type
+
+        # Secondary source: nearest known attack centroid from bundle metadata.
+        centroid_attack_type = self._predict_attack_type_with_centroids(x_scaled=x_scaled)
+        if centroid_attack_type:
+            return centroid_attack_type
+
+        # Fallback for labeled offline CSV flows.
+        flow_label = self._extract_flow_attack_label(flow)
+        if flow_label and not self._is_benign_label(flow_label):
+            return flow_label
+
+        return "Intrusion"
+
     @staticmethod
     def _anomaly_scores(original: np.ndarray, reconstructed: np.ndarray) -> np.ndarray:
         return np.sum((original - reconstructed) ** 2, axis=1)
@@ -140,7 +337,7 @@ class PCAIntrusionModel:
     def predict(self, flow: FlowRecord) -> tuple[str, float, float]:
         """
         Returns (attack_type, model_confidence, score).
-        attack_type is BENIGN or Intrusion.
+        attack_type is BENIGN or a specific attack type when available.
         """
         X_df = self._prepare(flow)
         x_scaled = self.scaler.transform(X_df)
@@ -149,7 +346,7 @@ class PCAIntrusionModel:
         score = float(self._anomaly_scores(x_scaled, x_reconstructed)[0])
 
         is_benign = score < self.threshold
-        attack_type = "BENIGN" if is_benign else "Intrusion"
+        attack_type = "BENIGN" if is_benign else self._predict_attack_type(flow=flow, x_df=X_df, x_scaled=x_scaled)
 
         eps = 1e-9
         if is_benign:
@@ -410,4 +607,18 @@ class DetectionClassificationAgent:
         print(f"  Total flows   : {len(results)}")
         print(f"  Attacks       : {len(attacks)}")
         print(f"  Benign        : {len(results) - len(attacks)}")
+        if attacks:
+            attack_ip_map: dict[str, set[str]] = {}
+            for result in attacks:
+                attack_name = str(result.attack_type or "Unknown").strip() or "Unknown"
+                src_ip = result.flow.src_ip or "unknown"
+                if attack_name not in attack_ip_map:
+                    attack_ip_map[attack_name] = set()
+                attack_ip_map[attack_name].add(src_ip)
+
+            print("-" * 55)
+            print("  Attack Type -> Source IP(s)")
+            for attack_name in sorted(attack_ip_map):
+                ips = ", ".join(sorted(attack_ip_map[attack_name]))
+                print(f"  {attack_name:<14} -> {ips}")
         print("=" * 55 + "\n")
