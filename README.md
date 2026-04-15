@@ -58,6 +58,72 @@ Download them from Kaggle and place the extracted CSVs under `data/raw/`:
 - Network Traffic Datasets (CIC-IDS2017, CSE-CIC-IDS2018)
 - Firewall or Router APIs
 
+## Quick Start (Setup + Run)
+
+### 1) Create and activate a virtual environment
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+```
+
+Windows (PowerShell):
+
+```powershell
+python -m venv .venv
+& ".\.venv\Scripts\Activate.ps1"
+```
+
+### 2) Install dependencies
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+### 3) Configure environment variables
+
+Copy `.env.example` to `.env`:
+
+```bash
+cp .env.example .env
+```
+
+Windows (PowerShell):
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Then edit `.env` and set real credentials as needed.
+
+Notes:
+- You can leave `KIBANA_HOST` empty for local runs; the app will use the built-in stub adapter.
+- `DATABASE_URL` is only required if you want to persist history to PostgreSQL.
+
+### 4) Run a sample classification
+
+```bash
+python -m src.main --mode csv --csv data/test/test.csv
+```
+
+Windows (venv) equivalent:
+
+```powershell
+& ".\.venv\Scripts\python.exe" -m src.main --mode csv --csv data/test/test.csv
+```
+
+### 5) Run tests
+
+```bash
+python -m pytest tests/test_intrusion_classification_agent.py -v
+```
+
+Windows (venv) equivalent:
+
+```powershell
+& ".\.venv\Scripts\python.exe" -m pytest tests/test_intrusion_classification_agent.py -v
+```
+
 ## Challenges
 - Requirement for large and high-quality network datasets
 - Real-time processing constraints
