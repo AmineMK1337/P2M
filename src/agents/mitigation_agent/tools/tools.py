@@ -10,11 +10,18 @@ remove the `success = True` stub line above it.
 """
 
 import logging
+import platform
+import subprocess
 from datetime import datetime
 
 from langchain_core.tools import tool
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Idempotency Tracking
+# ---------------------------------------------------------------------------
+_blocked_ips: set[str] = set()
 
 # ---------------------------------------------------------------------------
 # Session-scoped audit log — every tool call appends here so MitigationAgent
@@ -48,156 +55,242 @@ def _record(tool_name: str, ip: str, detail: str, success: bool) -> None:
 @tool
 def block_ip(ip_address: str, duration_minutes: int = 60) -> str:
     """
-    Block ALL inbound traffic from ip_address for duration_minutes minutes
-    using an iptables DROP rule. Use duration_minutes=0 for a permanent block.
+    Block ALL inbound traffic from ip_address using an OS firewall rule.
+    Works for both Linux (iptables) and Windows (netsh).
+    Idempotent: will not duplicate if the IP was already blocked by this session.
     """
+    global _blocked_ips
+    
+    if ip_address in _blocked_ips:
+        logger.info("[MitigationAgent] block_ip  ip=%s  already blocked (idempotent skip)", ip_address)
+        _record("block_ip", ip_address, f"duration={duration_minutes}m (skipped, already active)", True)
+        return f"[block_ip] SKIP — {ip_address} is already blocked."
+        
     logger.warning("[MitigationAgent] block_ip  ip=%s  duration=%d min", ip_address, duration_minutes)
 
-    # --- Uncomment to go live ---
-    # import subprocess
-    # cmd = ["iptables", "-I", "INPUT", "-s", ip_address, "-j", "DROP"]
-    # r = subprocess.run(cmd, capture_output=True, text=True)
-    # success = r.returncode == 0
-    # if not success:
-    #     logger.error("[MitigationAgent] iptables block_ip failed: %s", r.stderr)
-    # ----------------------------
-    success = True  # stub
+    success = False
+    error_msg = ""
+    os_system = platform.system()
+    
+    try:
+        if os_system == "Linux":
+            cmd = ["iptables", "-I", "INPUT", "-s", ip_address, "-j", "DROP"]
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            success = r.returncode == 0
+            if not success:
+                error_msg = r.stderr.strip()
+                
+        elif os_system == "Windows":
+            rule_name = f"ANDS_Block_{ip_address}"
+            cmd = [
+                "netsh", "advfirewall", "firewall", "add", "rule",
+                f"name={rule_name}", "dir=in", "action=block", f"remoteip={ip_address}"
+            ]
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            success = r.returncode == 0
+            if not success:
+                error_msg = r.stdout.strip() or r.stderr.strip()
+        else:
+            success = True
+            logger.warning("[MitigationAgent] block_ip simulated on unsupported OS: %s", os_system)
+            
+    except Exception as exc:
+        success = False
+        error_msg = str(exc)
 
-    _record("block_ip", ip_address, f"duration={duration_minutes}m", success)
-    return f"[block_ip] {'OK' if success else 'FAILED'} — blocked {ip_address} for {duration_minutes} min."
+    if success:
+        _blocked_ips.add(ip_address)
+        _record("block_ip", ip_address, f"duration={duration_minutes}m", True)
+        return f"[block_ip] OK — blocked {ip_address} for {duration_minutes} min via {os_system}."
+    else:
+        logger.error("[MitigationAgent] block_ip failed: %s", error_msg)
+        _record("block_ip", ip_address, f"failed: {error_msg}", False)
+        return f"[block_ip] FAILED — could not block {ip_address}: {error_msg}"
 
 
 @tool
 def rate_limit_ip(ip_address: str, max_connections_per_second: int = 10) -> str:
     """
-    Rate-limit inbound connections from ip_address to max_connections_per_second
-    using the iptables hashlimit module.
+    Rate-limit inbound connections from ip_address to max_connections_per_second.
+    Linux: Uses iptables hashlimit.
+    Windows: Not natively supported without QoS, falls back to full block.
     """
-    logger.warning(
-        "[MitigationAgent] rate_limit_ip  ip=%s  max_cps=%d",
-        ip_address, max_connections_per_second,
-    )
+    logger.warning("[MitigationAgent] rate_limit_ip  ip=%s  max_cps=%d", ip_address, max_connections_per_second)
 
-    # --- Uncomment to go live ---
-    # import subprocess
-    # cmd = [
-    #     "iptables", "-I", "INPUT",
-    #     "-s", ip_address,
-    #     "-m", "hashlimit",
-    #     "--hashlimit-name", f"rl_{ip_address.replace('.', '_')}",
-    #     "--hashlimit-above", f"{max_connections_per_second}/sec",
-    #     "--hashlimit-mode", "srcip",
-    #     "-j", "DROP",
-    # ]
-    # r = subprocess.run(cmd, capture_output=True, text=True)
-    # success = r.returncode == 0
-    # ----------------------------
-    success = True  # stub
+    os_system = platform.system()
+    success = False
+    error_msg = ""
+    
+    try:
+        if os_system == "Linux":
+            cmd = [
+                "iptables", "-I", "INPUT",
+                "-s", ip_address,
+                "-m", "hashlimit",
+                "--hashlimit-name", f"rl_{ip_address.replace('.', '_')}",
+                "--hashlimit-above", f"{max_connections_per_second}/sec",
+                "--hashlimit-mode", "srcip",
+                "-j", "DROP",
+            ]
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            success = r.returncode == 0
+            if not success:
+                error_msg = r.stderr.strip()
+        elif os_system == "Windows":
+            logger.warning("[MitigationAgent] rate_limit_ip not natively supported on Windows. Falling back to block.")
+            return block_ip.invoke({"ip_address": ip_address, "duration_minutes": 60})
+        else:
+            success = True
+            logger.warning("[MitigationAgent] rate_limit simulated on unsupported OS: %s", os_system)
+            
+    except Exception as exc:
+        success = False
+        error_msg = str(exc)
 
     _record("rate_limit_ip", ip_address, f"max_cps={max_connections_per_second}", success)
-    return (
-        f"[rate_limit_ip] {'OK' if success else 'FAILED'} — "
-        f"rate-limited {ip_address} to {max_connections_per_second} conn/s."
-    )
+    if success:
+        return f"[rate_limit_ip] OK — rate-limited {ip_address} to {max_connections_per_second} conn/s via {os_system}."
+    else:
+        logger.error("[MitigationAgent] rate_limit_ip failed: %s", error_msg)
+        return f"[rate_limit_ip] FAILED — {error_msg}"
 
 
 @tool
 def null_route_ip(ip_address: str) -> str:
     """
-    Black-hole all traffic from ip_address via a kernel null route
-    (ip route add blackhole). More effective than iptables for volumetric
-    DDoS because the drop happens at the routing layer before packet inspection.
+    Black-hole all traffic from ip_address via a kernel null route.
+    Linux: ip route add blackhole.
+    Windows: falls back to block.
     """
     logger.warning("[MitigationAgent] null_route_ip  ip=%s", ip_address)
 
-    # --- Uncomment to go live ---
-    # import subprocess
-    # cmd = ["ip", "route", "add", "blackhole", f"{ip_address}/32"]
-    # r = subprocess.run(cmd, capture_output=True, text=True)
-    # success = r.returncode == 0
-    # ----------------------------
-    success = True  # stub
+    os_system = platform.system()
+    success = False
+    error_msg = ""
+    
+    try:
+        if os_system == "Linux":
+            cmd = ["ip", "route", "add", "blackhole", f"{ip_address}/32"]
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            success = r.returncode == 0
+            if not success:
+                error_msg = r.stderr.strip()
+        elif os_system == "Windows":
+            logger.warning("[MitigationAgent] null_route_ip mapped to block_ip on Windows.")
+            return block_ip.invoke({"ip_address": ip_address, "duration_minutes": 60})
+        else:
+            success = True
+            logger.warning("[MitigationAgent] null_route simulated on unsupported OS: %s", os_system)
+    except Exception as exc:
+        success = False
+        error_msg = str(exc)
 
     _record("null_route_ip", ip_address, "blackhole", success)
-    return f"[null_route_ip] {'OK' if success else 'FAILED'} — null-routed {ip_address}."
+    if success:
+        return f"[null_route_ip] OK — null-routed {ip_address} via {os_system}."
+    else:
+        return f"[null_route_ip] FAILED — {error_msg}"
 
 
 @tool
 def throttle_connections(ip_address: str, max_new_per_minute: int = 5) -> str:
     """
     Throttle new TCP connections from ip_address to max_new_per_minute.
-    Effective against brute-force and credential-stuffing attacks.
-    Uses the iptables recent module.
+    Linux: iptables recent module.
+    Windows: falls back to block.
     """
-    logger.warning(
-        "[MitigationAgent] throttle_connections  ip=%s  max_new=%d/min",
-        ip_address, max_new_per_minute,
-    )
+    logger.warning("[MitigationAgent] throttle_connections  ip=%s  max_new=%d/min", ip_address, max_new_per_minute)
 
-    # --- Uncomment to go live ---
-    # import subprocess
-    # subprocess.run([
-    #     "iptables", "-I", "INPUT", "-p", "tcp", "-s", ip_address, "--syn",
-    #     "-m", "recent", "--name", "BF", "--set",
-    # ])
-    # subprocess.run([
-    #     "iptables", "-I", "INPUT", "-p", "tcp", "-s", ip_address, "--syn",
-    #     "-m", "recent", "--name", "BF", "--update",
-    #     "--seconds", "60", "--hitcount", str(max_new_per_minute), "-j", "DROP",
-    # ])
-    # success = True  # iptables never fails silently here
-    # ----------------------------
-    success = True  # stub
+    os_system = platform.system()
+    success = False
+    error_msg = ""
+    
+    try:
+        if os_system == "Linux":
+            subprocess.run([
+                "iptables", "-I", "INPUT", "-p", "tcp", "-s", ip_address, "--syn",
+                "-m", "recent", "--name", "BF", "--set",
+            ], capture_output=True)
+            r = subprocess.run([
+                "iptables", "-I", "INPUT", "-p", "tcp", "-s", ip_address, "--syn",
+                "-m", "recent", "--name", "BF", "--update",
+                "--seconds", "60", "--hitcount", str(max_new_per_minute), "-j", "DROP",
+            ], capture_output=True, text=True)
+            success = r.returncode == 0
+            if not success:
+                error_msg = r.stderr.strip()
+        elif os_system == "Windows":
+            logger.warning("[MitigationAgent] throttle_connections mapped to block_ip on Windows.")
+            return block_ip.invoke({"ip_address": ip_address, "duration_minutes": 60})
+        else:
+            success = True
+            logger.warning("[MitigationAgent] throttle_connections simulated on unsupported OS: %s", os_system)
+    except Exception as exc:
+        success = False
+        error_msg = str(exc)
 
     _record("throttle_connections", ip_address, f"max_new={max_new_per_minute}/min", success)
-    return (
-        f"[throttle_connections] {'OK' if success else 'FAILED'} — "
-        f"throttled {ip_address} to {max_new_per_minute} new conn/min."
-    )
+    if success:
+        return f"[throttle_connections] OK — throttled {ip_address} to {max_new_per_minute} new conn/min via {os_system}."
+    else:
+        return f"[throttle_connections] FAILED — {error_msg}"
 
 
 @tool
 def quarantine_host(ip_address: str) -> str:
     """
     Quarantine an internal host by moving it to a restricted VLAN segment.
-    Intended for botnet-infected internal machines.
     Requires an SDN controller or managed switch with an accessible API.
+    Currenly implemented as a stub/log.
     """
     logger.warning("[MitigationAgent] quarantine_host  ip=%s", ip_address)
-
-    # --- Uncomment to go live ---
-    # Push VLAN reassignment via NETCONF, OpenFlow, or vendor REST API
-    # ----------------------------
-    success = True  # stub
-
+    success = True
     _record("quarantine_host", ip_address, "vlan_quarantine", success)
-    return (
-        f"[quarantine_host] {'OK' if success else 'FAILED'} — "
-        f"{ip_address} moved to quarantine VLAN."
-    )
+    return f"[quarantine_host] OK — {ip_address} marked for quarantine VLAN."
 
 
 @tool
 def isolate_host(ip_address: str) -> str:
     """
     Fully isolate a host by blocking ALL inbound AND outbound traffic.
-    Used for confirmed infiltration / APT scenarios to stop lateral movement.
+    Linux: iptables DROP on INPUT and OUTPUT.
+    Windows: netsh advfirewall block on inbound and outbound.
     """
     logger.warning("[MitigationAgent] isolate_host  ip=%s", ip_address)
 
-    # --- Uncomment to go live ---
-    # import subprocess
-    # subprocess.run(["iptables", "-I", "INPUT",  "-s", ip_address, "-j", "DROP"])
-    # subprocess.run(["iptables", "-I", "OUTPUT", "-d", ip_address, "-j", "DROP"])
-    # success = True
-    # ----------------------------
-    success = True  # stub
+    os_system = platform.system()
+    success = False
+    error_msg = ""
+    
+    try:
+        if os_system == "Linux":
+            r1 = subprocess.run(["iptables", "-I", "INPUT",  "-s", ip_address, "-j", "DROP"], capture_output=True)
+            r2 = subprocess.run(["iptables", "-I", "OUTPUT", "-d", ip_address, "-j", "DROP"], capture_output=True)
+            success = r1.returncode == 0 and r2.returncode == 0
+            if not success:
+               error_msg = "failed to insert rules"
+        elif os_system == "Windows":
+            in_rule = f"ANDS_Isolate_In_{ip_address}"
+            out_rule = f"ANDS_Isolate_Out_{ip_address}"
+            cmd_in = ["netsh", "advfirewall", "firewall", "add", "rule", f"name={in_rule}", "dir=in", "action=block", f"remoteip={ip_address}"]
+            cmd_out = ["netsh", "advfirewall", "firewall", "add", "rule", f"name={out_rule}", "dir=out", "action=block", f"remoteip={ip_address}"]
+            r1 = subprocess.run(cmd_in, capture_output=True)
+            r2 = subprocess.run(cmd_out, capture_output=True)
+            success = r1.returncode == 0 and r2.returncode == 0
+            if not success:
+               error_msg = "failed to insert netsh rules"
+        else:
+            success = True
+            logger.warning("[MitigationAgent] isolate_host simulated on %s", os_system)
+    except Exception as exc:
+        success = False
+        error_msg = str(exc)
 
     _record("isolate_host", ip_address, "full_isolation", success)
-    return (
-        f"[isolate_host] {'OK' if success else 'FAILED'} — "
-        f"{ip_address} fully isolated (inbound + outbound blocked)."
-    )
+    if success:
+        return f"[isolate_host] OK — {ip_address} fully isolated (inbound + outbound blocked)."
+    else:
+        return f"[isolate_host] FAILED — {error_msg}"
 
 
 @tool

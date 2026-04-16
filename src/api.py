@@ -9,10 +9,12 @@ from fastapi.middleware.cors import CORSMiddleware
 try:
     from src.agents.classification_agent.agent import FlowInputConfig, DetectionClassificationAgent, get_flow_stream
     from src.agents.classification_agent.kibana_adapter import StubKibanaAdapter
+    from src.agents.mitigation_agent.agent import MitigationAgent
     from src.shared.schemas import ClassificationResult
 except ModuleNotFoundError:
     from agents.classification_agent.agent import FlowInputConfig, DetectionClassificationAgent, get_flow_stream
     from agents.classification_agent.kibana_adapter import StubKibanaAdapter
+    from agents.mitigation_agent.agent import MitigationAgent
     from shared.schemas import ClassificationResult
 
 logging.basicConfig(level=logging.INFO)
@@ -109,10 +111,12 @@ async def agent_loop():
     model_path = main_script._default_model_path()
     
     kibana = StubKibanaAdapter()
+    mitigation_agent = MitigationAgent()
     
     agent = DetectionClassificationAgent(
         model_path=model_path,
         kibana=kibana,
+        on_attack=mitigation_agent.mitigate,
         threshold=0.5,
         kibana_window_minutes=10,
         push_benign_to_kibana=False,

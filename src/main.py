@@ -14,10 +14,12 @@ from pathlib import Path
 try:
 	from src.agents.classification_agent.agent import FlowInputConfig, DetectionClassificationAgent
 	from src.agents.classification_agent.kibana_adapter import KibanaAdapter, KibanaConfig, StubKibanaAdapter
+	from src.agents.mitigation_agent.agent import MitigationAgent
 	from src.shared.schemas import ClassificationResult
 except ModuleNotFoundError:
 	from agents.classification_agent.agent import FlowInputConfig, DetectionClassificationAgent
 	from agents.classification_agent.kibana_adapter import KibanaAdapter, KibanaConfig, StubKibanaAdapter
+	from agents.mitigation_agent.agent import MitigationAgent
 	from shared.schemas import ClassificationResult
 
 
@@ -32,14 +34,7 @@ def _default_model_path() -> str:
 	return str(Path(__file__).resolve().parents[1] / "deployments" / "models" / "pca_intrusion_detector.joblib")
 
 
-def forward_to_agent3(result: ClassificationResult):
-	"""Bridge callback for confirmed attacks."""
-	print(
-		"[Bridge -> Agent3] "
-		f"type={result.attack_type} | conf={result.confidence:.3f} | "
-		f"ip={result.flow.src_ip} | source={result.decision_source}"
-	)
-
+# Dummy forward removed since we use MitigationAgent explicitly
 
 def parse_args():
 	parser = argparse.ArgumentParser(description="ANDS Classification Agent")
@@ -82,10 +77,12 @@ def main():
 		watch_dir=args.watch,
 	)
 
+	mitigation_agent = MitigationAgent()
+
 	agent = DetectionClassificationAgent(
 		model_path=args.model,
 		kibana=kibana,
-		on_attack=forward_to_agent3,
+		on_attack=mitigation_agent.mitigate,
 		threshold=args.threshold,
 		kibana_window_minutes=args.window,
 		model_threshold_override=args.model_threshold,
