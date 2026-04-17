@@ -85,6 +85,13 @@ def get_flow_stream(config: FlowInputConfig) -> Iterator[FlowRecord]:
 
         for csv_file in sorted(watch.glob("*.csv")):
             yield from _iter_csv(csv_file, source="cicflowmeter")
+            
+            # Post-processing: mark as done so it's not re-processed implicitly by the next glob
+            try:
+                done_file = csv_file.with_suffix(".csv.done")
+                csv_file.rename(done_file)
+            except Exception as e:
+                logger.error("Failed to rename processed csv file %s: %e", csv_file, e)
         return
 
     raise ValueError("mode must be one of: csv, cicflowmeter")

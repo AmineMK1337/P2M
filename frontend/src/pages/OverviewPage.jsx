@@ -1,6 +1,7 @@
 import { motion } from "framer-motion";
 import PipelineFlow from "../components/PipelineFlow";
 import StatCard from "../components/StatCard";
+import LogFeedPanel from "../components/LogFeedPanel";
 
 function OverviewPage({ state }) {
   const attack = state.ml.prediction === "attack";
@@ -21,17 +22,23 @@ function OverviewPage({ state }) {
 
       <PipelineFlow state={state} />
 
-      <motion.section
-        initial={{ opacity: 0, y: 10 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="glass-panel rounded-2xl p-4"
-      >
-        <div className="flex items-center justify-between">
-          <h2 className="font-display text-lg font-semibold">System Status</h2>
-          <span className={`status-pill ${attack ? "status-danger" : "status-ok"}`}>{state.status}</span>
-        </div>
-        <p className="mt-3 text-sm text-slate-300">{state.ml.reasoning}</p>
-      </motion.section>
+      <div className="grid min-h-0 grid-cols-1 gap-4 lg:grid-cols-[1fr_3fr]">
+        <motion.section
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="glass-panel rounded-2xl p-4 flex flex-col h-full"
+        >
+          <div className="flex items-center justify-between">
+            <h2 className="font-display text-lg font-semibold">System Status</h2>
+            <span className={`status-pill ${attack ? "status-danger" : "status-ok"}`}>{state.status}</span>
+          </div>
+          <p className="mt-3 text-sm text-slate-300 font-mono flex-1">{state.ml.reasoning}</p>
+        </motion.section>
+
+        <section className="h-[280px] lg:h-[320px]">
+          <LogFeedPanel logs={state.logs} />
+        </section>
+      </div>
     </div>
   );
 }

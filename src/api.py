@@ -104,50 +104,70 @@ def update_global_state(result: ClassificationResult):
     }
 
 async def agent_loop():
-    logger.info("Starting background agent loop...")
-    
-    # Initialise as we did in main.py
-    import src.main as main_script
-    model_path = main_script._default_model_path()
+    """
+    Background worker that indefinitely streams data into the ClassificationAgent.
+    This replaces the previous 'main.py' CLI loop when running via the API.
+    """
+    logger.info("Initializing background agent loop...")
     
     kibana = StubKibanaAdapter()
     mitigation_agent = MitigationAgent()
     
     agent = DetectionClassificationAgent(
-        model_path=model_path,
+        model_path="deployments/models/pca_intrusion_detector.joblib",
         kibana=kibana,
         on_attack=mitigation_agent.mitigate,
         threshold=0.5,
-        kibana_window_minutes=10,
-        push_benign_to_kibana=False,
+        push_benign_to_kibana=True
     )
     
-    # We check if data/flows.csv exists, fallback if not
-    import os
+    # 1. Determine the active capture mode
     target_csv = "data/flows.csv"
-    if not os.path.exists(target_csv):
-        target_csv = "data/test/test.csv"
-        
-    input_config = FlowInputConfig(
-        mode="csv",
-        csv_path=target_csv
-    )
+    watch_dir = os.path.expanduser("~/ands/flows_csv")
     
+    is_live = False
+    if os.path.exists(watch_dir):
+        logger.info(f"Live watch directory detected at {watch_dir}. API set to live pipeline mode.")
+        input_config = FlowInputConfig(mode="cicflowmeter", watch_dir=watch_dir)
+        is_live = True
+        global_state["capture"] = {"status": "running", "source": "cicflowmeter"}
+    else:
+        if not os.path.exists(target_csv):
+            target_csv = "data/test/test.csv"
+        logger.info(f"Live processing directory off. Fallback to API CSV mock stream: {target_csv}")
+        input_config = FlowInputConfig(mode="csv", csv_path=target_csv)
+        global_state["capture"] = {"status": "mock", "source": "csv"}
+        
+    global_state["capture"]["status"] = "running"
+        
     while True:
         try:
-            logger.info(f"Beginning to stream flows from {target_csv}...")
+            if not is_live:
+                logger.info(f"Beginning to stream flows from {target_csv}...")
+                
             for flow in get_flow_stream(input_config):
+                # Classify
                 result = agent.process_flow(flow)
+                
+                # Update Dashboard State
                 update_global_state(result)
                 
-                # Simulate realistic incoming stream delays (1.0s per flow)
-                await asyncio.sleep(1.0)
+                # Sleep between individual CSV flows to simulate realtime
+                if not is_live:
+                    await asyncio.sleep(1.0)
             
-            logger.info("Flow stream exhausted. Restarting loop in 5 seconds to simulate continued monitoring.")
-            await asyncio.sleep(5)
+            if is_live:
+                # The directory exhausted. Sleep briefly before polling for the next 5-sec PCAP cutoff.
+                await asyncio.sleep(1.5)
+            else:
+                logger.info("Flow stream exhausted. Restarting loop in 5 seconds to simulate continued monitoring.")
+                await asyncio.sleep(5)
             
+        except FileNotFoundError as e:
+            logger.error(f"Waiting for capture directory: {e}")
+            await asyncio.sleep(3)
         except Exception as e:
-            logger.error(f"Error in agent_loop: {e}")
+            logger.error(f"Exception in agent loop: {e}")
             await asyncio.sleep(5)
 
 @app.on_event("startup")
