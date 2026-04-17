@@ -97,13 +97,33 @@ Copy-Item .env.example .env
 Then edit `.env` and set real credentials as needed.
 
 Notes:
-- You can leave `KIBANA_HOST` empty for local runs; the app will use the built-in stub adapter.
-- `DATABASE_URL` is only required if you want to persist history to PostgreSQL.
+- `SIEM_BACKEND=elasticsearch` is the default/recommended setup.
+- Configure `KIBANA_HOST` and `KIBANA_INDEX` so the classifier can fuse model output with Kibana SIEM history.
+- If Elasticsearch is not available, you can use `SIEM_BACKEND=postgresql` + `SIEM_DB_URL` or `SIEM_BACKEND=sqlite` + `SIEM_SQLITE_PATH`.
+- Set `SIEM_BACKEND=stub` only for temporary in-memory development mode.
 
 ### 4) Run a sample classification
 
 ```bash
 python -m src.main --mode csv --csv data/test/test.csv
+```
+
+Force Elasticsearch/Kibana explicitly:
+
+```bash
+python -m src.main --siem-backend elasticsearch --kibana-host http://localhost:9200 --kibana-index ands-alerts --mode csv --csv data/test/test.csv
+```
+
+Force SQLite persistence explicitly:
+
+```bash
+python -m src.main --siem-backend sqlite --siem-sqlite-path data/siem_history.db --mode csv --csv data/test/test.csv
+```
+
+Force PostgreSQL persistence explicitly:
+
+```bash
+python -m src.main --siem-backend postgresql --siem-db-url postgresql://postgres:password@localhost:5432/postgres --mode csv --csv data/test/test.csv
 ```
 
 Windows (venv) equivalent:

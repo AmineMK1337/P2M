@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import time
 from typing import Dict, Any, List
 
@@ -8,12 +9,22 @@ from fastapi.middleware.cors import CORSMiddleware
 
 try:
     from src.agents.classification_agent.agent import FlowInputConfig, DetectionClassificationAgent, get_flow_stream
-    from src.agents.classification_agent.kibana_adapter import StubKibanaAdapter
+    from src.agents.classification_agent.kibana_adapter import (
+        DatabaseSIEMConfig,
+        KibanaConfig,
+        StubKibanaAdapter,
+        create_siem_adapter,
+    )
     from src.agents.mitigation_agent.agent import MitigationAgent
     from src.shared.schemas import ClassificationResult
 except ModuleNotFoundError:
     from agents.classification_agent.agent import FlowInputConfig, DetectionClassificationAgent, get_flow_stream
-    from agents.classification_agent.kibana_adapter import StubKibanaAdapter
+    from agents.classification_agent.kibana_adapter import (
+        DatabaseSIEMConfig,
+        KibanaConfig,
+        StubKibanaAdapter,
+        create_siem_adapter,
+    )
     from agents.mitigation_agent.agent import MitigationAgent
     from shared.schemas import ClassificationResult
 
@@ -49,6 +60,48 @@ global_state: Dict[str, Any] = {
 
 flow_count = 0
 blocked_ips = set()
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _build_siem_adapter():
+    backend = os.getenv("SIEM_BACKEND", "elasticsearch")
+    kibana_host = (os.getenv("KIBANA_HOST") or "").strip()
+
+    kibana_config = None
+    if kibana_host:
+        kibana_config = KibanaConfig(
+            host=kibana_host,
+            index=os.getenv("KIBANA_INDEX", "ands-alerts"),
+            username=os.getenv("KIBANA_USER") or None,
+            password=os.getenv("KIBANA_PASS") or None,
+            verify_certs=_env_bool("KIBANA_VERIFY_CERTS", False),
+            max_alerts=int(os.getenv("SIEM_MAX_ALERTS", "50")),
+        )
+
+    db_url = os.getenv("SIEM_DB_URL") or os.getenv("DATABASE_URL")
+    sqlite_path = os.getenv("SIEM_SQLITE_PATH", "data/siem_history.db")
+    if not db_url and backend.strip().lower() in {"auto", "database", "db", "sqlite"}:
+        db_url = f"sqlite:///{sqlite_path}"
+
+    db_config = DatabaseSIEMConfig(
+        url=db_url or f"sqlite:///{sqlite_path}",
+        table=os.getenv("SIEM_DB_TABLE", "siem_alerts"),
+        max_alerts=int(os.getenv("SIEM_MAX_ALERTS", "50")),
+    )
+
+    adapter = create_siem_adapter(
+        backend=backend,
+        kibana_config=kibana_config,
+        database_config=db_config,
+    )
+    logger.info("[API] SIEM adapter initialized: %s", adapter.__class__.__name__)
+    return adapter
 
 def update_global_state(result: ClassificationResult):
     global flow_count, blocked_ips, global_state
@@ -110,15 +163,28 @@ async def agent_loop():
     """
     logger.info("Initializing background agent loop...")
     
-    kibana = StubKibanaAdapter()
+    kibana = _build_siem_adapter()
     mitigation_agent = MitigationAgent()
+
+    use_siem_history = _env_bool(
+        "USE_SIEM_HISTORY",
+        default=not isinstance(kibana, StubKibanaAdapter),
+    )
+    siem_window = int(os.getenv("SIEM_WINDOW_MINUTES", "10"))
+    save_benign = _env_bool("KIBANA_SAVE_ALL", True)
+
+    global_state["logs"].append(
+        f"[API] SIEM backend active: {kibana.__class__.__name__} (history_fusion={'on' if use_siem_history else 'off'})"
+    )
     
     agent = DetectionClassificationAgent(
         model_path="deployments/models/pca_intrusion_detector.joblib",
         kibana=kibana,
         on_attack=mitigation_agent.mitigate,
         threshold=0.5,
-        push_benign_to_kibana=True
+        push_benign_to_kibana=save_benign,
+        kibana_window_minutes=siem_window,
+        use_siem_history=use_siem_history,
     )
     
     # 1. Determine the active capture mode

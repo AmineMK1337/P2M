@@ -19,6 +19,7 @@ Run from the repo root:
 """
 
 import logging
+import os
 import sys
 
 logging.basicConfig(
@@ -31,15 +32,65 @@ try:
         DetectionClassificationAgent,
         FlowInputConfig,
     )
-    from src.agents.classification_agent.kibana_adapter import StubKibanaAdapter
+    from src.agents.classification_agent.kibana_adapter import (
+        DatabaseSIEMConfig,
+        KibanaConfig,
+        StubKibanaAdapter,
+        create_siem_adapter,
+    )
     from src.agents.mitigation_agent.agent import MitigationAgent, MitigationResult
 except ModuleNotFoundError:
     from agents.classification_agent.agent import (
         DetectionClassificationAgent,
         FlowInputConfig,
     )
-    from agents.classification_agent.kibana_adapter import StubKibanaAdapter
+    from agents.classification_agent.kibana_adapter import (
+        DatabaseSIEMConfig,
+        KibanaConfig,
+        StubKibanaAdapter,
+        create_siem_adapter,
+    )
     from agents.mitigation_agent.agent import MitigationAgent, MitigationResult
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _build_siem_adapter():
+    backend = os.getenv("SIEM_BACKEND", "elasticsearch")
+    kibana_host = (os.getenv("KIBANA_HOST") or "").strip()
+
+    kibana_config = None
+    if kibana_host:
+        kibana_config = KibanaConfig(
+            host=kibana_host,
+            index=os.getenv("KIBANA_INDEX", "ands-alerts"),
+            username=os.getenv("KIBANA_USER") or None,
+            password=os.getenv("KIBANA_PASS") or None,
+            verify_certs=_env_bool("KIBANA_VERIFY_CERTS", False),
+            max_alerts=int(os.getenv("SIEM_MAX_ALERTS", "50")),
+        )
+
+    db_url = os.getenv("SIEM_DB_URL") or os.getenv("DATABASE_URL")
+    sqlite_path = os.getenv("SIEM_SQLITE_PATH", "data/siem_history.db")
+    if not db_url and backend.strip().lower() in {"auto", "database", "db", "sqlite"}:
+        db_url = f"sqlite:///{sqlite_path}"
+
+    database_config = DatabaseSIEMConfig(
+        url=db_url or f"sqlite:///{sqlite_path}",
+        table=os.getenv("SIEM_DB_TABLE", "siem_alerts"),
+        max_alerts=int(os.getenv("SIEM_MAX_ALERTS", "50")),
+    )
+
+    return create_siem_adapter(
+        backend=backend,
+        kibana_config=kibana_config,
+        database_config=database_config,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +103,8 @@ def run_callback_mode():
     ClassificationAgent. Every confirmed attack is mitigated immediately.
     """
     mitigation_agent = MitigationAgent(model_name="llama3")
+    siem_adapter = _build_siem_adapter()
+    use_siem_history = _env_bool("USE_SIEM_HISTORY", default=not isinstance(siem_adapter, StubKibanaAdapter))
 
     def on_attack(classification_result):
         result: MitigationResult = mitigation_agent.mitigate(classification_result)
@@ -59,8 +112,11 @@ def run_callback_mode():
 
     classification_agent = DetectionClassificationAgent(
         model_path="deployments/models/pca_intrusion_detector.joblib",
-        kibana=StubKibanaAdapter(),
+        kibana=siem_adapter,
         on_attack=on_attack,            # ← MitigationAgent wired here
+        kibana_window_minutes=int(os.getenv("SIEM_WINDOW_MINUTES", "10")),
+        push_benign_to_kibana=_env_bool("KIBANA_SAVE_ALL", False),
+        use_siem_history=use_siem_history,
     )
 
     classification_agent.run(
@@ -77,9 +133,15 @@ def run_batch_mode():
     ClassificationAgent runs first, then MitigationAgent processes all
     flagged results in one pass.
     """
+    siem_adapter = _build_siem_adapter()
+    use_siem_history = _env_bool("USE_SIEM_HISTORY", default=not isinstance(siem_adapter, StubKibanaAdapter))
+
     classification_agent = DetectionClassificationAgent(
         model_path="deployments/models/pca_intrusion_detector.joblib",
-        kibana=StubKibanaAdapter(),
+        kibana=siem_adapter,
+        kibana_window_minutes=int(os.getenv("SIEM_WINDOW_MINUTES", "10")),
+        push_benign_to_kibana=_env_bool("KIBANA_SAVE_ALL", False),
+        use_siem_history=use_siem_history,
     )
 
     classification_results = classification_agent.run(
