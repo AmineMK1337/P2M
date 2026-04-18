@@ -4,26 +4,22 @@ import os
 import time
 from typing import Dict, Any, List
 
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 try:
     from src.agents.classification_agent.agent import FlowInputConfig, DetectionClassificationAgent, get_flow_stream
     from src.agents.classification_agent.kibana_adapter import (
-        DatabaseSIEMConfig,
+        KibanaAdapter,
         KibanaConfig,
-        StubKibanaAdapter,
-        create_siem_adapter,
     )
     from src.agents.mitigation_agent.agent import MitigationAgent
     from src.shared.schemas import ClassificationResult
 except ModuleNotFoundError:
     from agents.classification_agent.agent import FlowInputConfig, DetectionClassificationAgent, get_flow_stream
     from agents.classification_agent.kibana_adapter import (
-        DatabaseSIEMConfig,
+        KibanaAdapter,
         KibanaConfig,
-        StubKibanaAdapter,
-        create_siem_adapter,
     )
     from agents.mitigation_agent.agent import MitigationAgent
     from shared.schemas import ClassificationResult
@@ -70,12 +66,12 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 def _build_siem_adapter():
-    backend = os.getenv("SIEM_BACKEND", "elasticsearch")
-    kibana_host = (os.getenv("KIBANA_HOST") or "").strip()
+    kibana_host = (os.getenv("KIBANA_HOST") or "http://localhost:9200").strip()
+    if not kibana_host:
+        raise RuntimeError("KIBANA_HOST is required for SIEM history fusion.")
 
-    kibana_config = None
-    if kibana_host:
-        kibana_config = KibanaConfig(
+    adapter = KibanaAdapter(
+        KibanaConfig(
             host=kibana_host,
             index=os.getenv("KIBANA_INDEX", "ands-alerts"),
             username=os.getenv("KIBANA_USER") or None,
@@ -83,23 +79,12 @@ def _build_siem_adapter():
             verify_certs=_env_bool("KIBANA_VERIFY_CERTS", False),
             max_alerts=int(os.getenv("SIEM_MAX_ALERTS", "50")),
         )
-
-    db_url = os.getenv("SIEM_DB_URL") or os.getenv("DATABASE_URL")
-    sqlite_path = os.getenv("SIEM_SQLITE_PATH", "data/siem_history.db")
-    if not db_url and backend.strip().lower() in {"auto", "database", "db", "sqlite"}:
-        db_url = f"sqlite:///{sqlite_path}"
-
-    db_config = DatabaseSIEMConfig(
-        url=db_url or f"sqlite:///{sqlite_path}",
-        table=os.getenv("SIEM_DB_TABLE", "siem_alerts"),
-        max_alerts=int(os.getenv("SIEM_MAX_ALERTS", "50")),
     )
-
-    adapter = create_siem_adapter(
-        backend=backend,
-        kibana_config=kibana_config,
-        database_config=db_config,
-    )
+    if not adapter.is_available():
+        raise RuntimeError(
+            f"Could not connect to Elasticsearch at {kibana_host}. "
+            "Start Elasticsearch/Kibana or update KIBANA_HOST credentials."
+        )
     logger.info("[API] SIEM adapter initialized: %s", adapter.__class__.__name__)
     return adapter
 
@@ -156,20 +141,16 @@ def update_global_state(result: ClassificationResult):
         "last_blocked_ip": blocked_list[-1] if blocked_list else "none"
     }
 
-async def agent_loop():
+async def agent_loop(kibana):
     """
     Background worker that indefinitely streams data into the ClassificationAgent.
     This replaces the previous 'main.py' CLI loop when running via the API.
     """
     logger.info("Initializing background agent loop...")
     
-    kibana = _build_siem_adapter()
     mitigation_agent = MitigationAgent()
 
-    use_siem_history = _env_bool(
-        "USE_SIEM_HISTORY",
-        default=not isinstance(kibana, StubKibanaAdapter),
-    )
+    use_siem_history = _env_bool("USE_SIEM_HISTORY", default=True)
     siem_window = int(os.getenv("SIEM_WINDOW_MINUTES", "10"))
     save_benign = _env_bool("KIBANA_SAVE_ALL", True)
 
@@ -238,7 +219,8 @@ async def agent_loop():
 
 @app.on_event("startup")
 async def startup_event():
-    asyncio.create_task(agent_loop())
+    kibana = _build_siem_adapter()
+    asyncio.create_task(agent_loop(kibana))
 
 @app.get("/api/system_state")
 async def get_system_state():

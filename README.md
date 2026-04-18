@@ -97,10 +97,9 @@ Copy-Item .env.example .env
 Then edit `.env` and set real credentials as needed.
 
 Notes:
-- `SIEM_BACKEND=elasticsearch` is the default/recommended setup.
+- Elasticsearch/Kibana is the SIEM backend used by runtime components.
 - Configure `KIBANA_HOST` and `KIBANA_INDEX` so the classifier can fuse model output with Kibana SIEM history.
-- If Elasticsearch is not available, you can use `SIEM_BACKEND=postgresql` + `SIEM_DB_URL` or `SIEM_BACKEND=sqlite` + `SIEM_SQLITE_PATH`.
-- Set `SIEM_BACKEND=stub` only for temporary in-memory development mode.
+- The API/CLI now fail fast if Elasticsearch is unreachable, to avoid silently degrading fusion.
 
 ### 4) Run a sample classification
 
@@ -111,19 +110,7 @@ python -m src.main --mode csv --csv data/test/test.csv
 Force Elasticsearch/Kibana explicitly:
 
 ```bash
-python -m src.main --siem-backend elasticsearch --kibana-host http://localhost:9200 --kibana-index ands-alerts --mode csv --csv data/test/test.csv
-```
-
-Force SQLite persistence explicitly:
-
-```bash
-python -m src.main --siem-backend sqlite --siem-sqlite-path data/siem_history.db --mode csv --csv data/test/test.csv
-```
-
-Force PostgreSQL persistence explicitly:
-
-```bash
-python -m src.main --siem-backend postgresql --siem-db-url postgresql://postgres:password@localhost:5432/postgres --mode csv --csv data/test/test.csv
+python -m src.main --kibana-host http://localhost:9200 --kibana-index ands-alerts --mode csv --csv data/test/test.csv
 ```
 
 Windows (venv) equivalent:
