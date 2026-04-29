@@ -4,6 +4,9 @@ import os
 import time
 from typing import Dict, Any, List
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -51,6 +54,11 @@ global_state: Dict[str, Any] = {
     },
     "decision": {"action": "allow", "source": "policy", "confidence": 0.5},
     "defense": {"blocked_ips": [], "total": 0, "last_blocked_ip": None},
+    "mitigation": {
+        "status": "pending",
+        "actions_taken": [],
+        "mitigated": False
+    },
     "logs": ["[API] System booted. Initializing Classification Agent..."]
 }
 
@@ -66,6 +74,10 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 def _build_siem_adapter():
+    if not _env_bool("USE_SIEM_HISTORY", default=True):
+        logger.info("[API] USE_SIEM_HISTORY is False. Skipping Elasticsearch connection.")
+        return None
+
     kibana_host = (os.getenv("KIBANA_HOST") or "http://localhost:9200").strip()
     if not kibana_host:
         raise RuntimeError("KIBANA_HOST is required for SIEM history fusion.")
@@ -139,6 +151,13 @@ def update_global_state(result: ClassificationResult):
         "blocked_ips": blocked_list,
         "total": len(blocked_ips),
         "last_blocked_ip": blocked_list[-1] if blocked_list else "none"
+    }
+
+    # Add detailed mitigation data for the dashboard
+    global_state["mitigation"] = {
+        "status": result.mitigation_status,
+        "actions_taken": result.mitigation_actions,
+        "mitigated": result.mitigated
     }
 
 async def agent_loop(kibana):

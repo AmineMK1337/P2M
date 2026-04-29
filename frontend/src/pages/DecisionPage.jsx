@@ -31,18 +31,22 @@ function DecisionPage({ state }) {
 
         <div className="mb-4 space-y-2">
           <AnimatePresence>
-            {blockedIps.slice(0, 10).map((ip) => (
-              <motion.div
-                key={ip}
-                layout
-                initial={{ opacity: 0, x: 14 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: -14 }}
-                className="rounded-lg border border-rose-400/35 bg-rose-500/10 px-3 py-2 font-mono text-sm text-rose-100"
-              >
-                {ip}
-              </motion.div>
-            ))}
+            {(state.mitigation?.actions_taken || []).length > 0 ? (
+              state.mitigation.actions_taken.map((action, idx) => (
+                <motion.div
+                  key={idx}
+                  layout
+                  initial={{ opacity: 0, x: 14 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: -14 }}
+                  className="rounded-lg border border-rose-400/35 bg-rose-500/10 px-3 py-2 font-mono text-sm text-rose-100"
+                >
+                  {action}
+                </motion.div>
+              ))
+            ) : (
+              <p className="font-mono text-xs text-slate-500 italic">No active mitigation actions.</p>
+            )}
           </AnimatePresence>
         </div>
 

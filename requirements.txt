@@ -30,4 +30,4 @@ openpyxl==3.1.5
 # Web API Backend
 fastapi>=0.100.0
 uvicorn>=0.23.0
-
+python-dotenv>=1.0.0
