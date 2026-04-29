@@ -212,8 +212,9 @@ async def agent_loop(kibana):
                 logger.info(f"Beginning to stream flows from {target_csv}...")
                 
             for flow in get_flow_stream(input_config):
-                # Classify
-                result = agent.process_flow(flow)
+                # Classify in a separate thread so the interactive terminal prompt 
+                # doesn't freeze the FastAPI web server
+                result = await asyncio.to_thread(agent.process_flow, flow)
                 
                 # Update Dashboard State
                 update_global_state(result)

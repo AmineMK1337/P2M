@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { fetchSystemState } from "../services/api";
 import { createMockSystemState } from "../data/mockData";
 
-export function useSystemState(intervalMs = 2500) {
+export function useSystemState(intervalMs = 5000) {
   const [state, setState] = useState(() => createMockSystemState());
   const [loading, setLoading] = useState(true);
   const [source, setSource] = useState("boot");
