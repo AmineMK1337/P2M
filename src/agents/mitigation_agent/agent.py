@@ -1,24 +1,27 @@
 """
-ANDS — MitigationAgent
+ANDS — MitigationAgent (Deterministic Executor)
 
 Receives a ClassificationResult from the ClassificationAgent and applies
-the appropriate automated response via a LangGraph ReAct agent.
+the appropriate automated response by invoking mitigation tools directly
+in the order defined by strategy_map.py.
+
+No LLM is required in the hot path. Every execution is deterministic:
+the same attack type and confidence always produce the same tool sequence.
 
 Usage
 -----
-Callback mode (real-time, fires on every attack the ClassificationAgent detects):
+Callback mode (real-time):
 
     from src.agents.mitigation_agent.agent import MitigationAgent
 
     mitigation_agent = MitigationAgent()
-
     classification_agent = DetectionClassificationAgent(
         ...,
-        on_attack=mitigation_agent.mitigate,   # wire here
+        on_attack=mitigation_agent.mitigate,
     )
     classification_agent.run(input_config)
 
-Batch mode (offline analysis):
+Batch mode:
 
     results = classification_agent.run(input_config)
     mitigation_agent.run_batch(results)
@@ -31,8 +34,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Optional
 
-from langchain_ollama import ChatOllama
-from langgraph.prebuilt import create_react_agent
 
 try:
     from src.shared.schemas import ClassificationResult
@@ -125,10 +126,9 @@ class MitigationAgent:
 
     For each confirmed attack it:
     1. Selects the mitigation strategy from strategy_map.py.
-    2. Builds a LangGraph ReAct agent with only the relevant tools.
-    3. Runs the agent and collects actions from the audit log.
-    4. Mutates the incoming ClassificationResult in-place so the rest
-       of the pipeline always has a unified state object:
+    2. Invokes each tool directly in order (deterministic — no LLM).
+    3. Calls alert_soc unconditionally as the final step.
+    4. Mutates the incoming ClassificationResult in-place:
            classification.mitigated          → bool
            classification.mitigation_status  → "mitigated" | "failed" | "skipped"
            classification.mitigation_actions → list[str]
@@ -137,10 +137,8 @@ class MitigationAgent:
 
     def __init__(
         self,
-        model_name: str = "llama3",
         on_mitigated: Optional[Callable[[MitigationResult], None]] = None,
     ):
-        self.model_name   = model_name
         self.on_mitigated = on_mitigated
 
     # ------------------------------------------------------------------
@@ -181,7 +179,7 @@ class MitigationAgent:
         )
 
         clear_action_log()
-        agent_response = self._run_react_agent(classification, strategies)
+        agent_response = self._run_deterministic(classification, strategies)
         actions        = [
             f"{e['tool']}({e['ip']}) — {e['detail']}"
             for e in get_action_log()
@@ -228,70 +226,45 @@ class MitigationAgent:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _run_react_agent(
+    def _run_deterministic(
         self,
         classification: ClassificationResult,
         strategies: list[str],
     ) -> str:
-        # Only expose tools relevant to this attack to keep the agent focused
-        active_tools = [
-            _TOOL_REGISTRY[name]
-            for name in strategies
-            if name in _TOOL_REGISTRY
-        ] or [alert_soc]
+        """
+        Execute mitigation tools in order without an LLM.
+        alert_soc is always invoked last to guarantee an audit trail.
+        Tool failures are caught, logged, and included in the SOC message.
+        """
+        ip  = classification.src_ip
+        sev = classification.severity
+        executed: list[str] = []
+        failed:   list[str] = []
 
-        llm   = ChatOllama(model=self.model_name)
-        agent = create_react_agent(llm, active_tools)
+        for tool_name in strategies:
+            if tool_name == "alert_soc":
+                continue  # called explicitly at the end
+            tool = _TOOL_REGISTRY.get(tool_name)
+            if tool is None:
+                logger.warning("[MitigationAgent] Unknown tool '%s' — skipping.", tool_name)
+                failed.append(f"unknown_tool({tool_name})")
+                continue
+            try:
+                out = tool.invoke({"ip_address": ip})
+                executed.append(f"{tool_name}: {out}")
+                logger.info("[MitigationAgent] %s OK — %s", tool_name, out)
+            except Exception as exc:
+                logger.error("[MitigationAgent] %s FAILED — %s", tool_name, exc)
+                failed.append(f"{tool_name}: {exc}")
 
-        try:
-            response = agent.invoke(
-                {"messages": [("user", self._build_prompt(classification, strategies))]}
-            )
-            messages = response.get("messages", [])
-            for msg in reversed(messages):
-                if hasattr(msg, "content") and isinstance(msg.content, str):
-                    return msg.content
-            return "Agent completed with no text response."
-
-        except Exception as exc:
-            logger.error("[MitigationAgent] ReAct agent error: %s", exc)
-            # Guarantee the event is never silently dropped
-            alert_soc.invoke({
-                "message": (
-                    f"MitigationAgent error for {classification.src_ip} "
-                    f"({classification.attack_type}): {exc}"
-                ),
-                "severity": "high",
-            })
-            return f"Agent error — fallback SOC alert sent. Error: {exc}"
-
-    @staticmethod
-    def _build_prompt(
-        classification: ClassificationResult,
-        strategies: list[str],
-    ) -> str:
-        return f"""You are the MitigationAgent of the Adaptive Network Defense System (ANDS).
-The ClassificationAgent has confirmed a network attack. Your job is to neutralise it
-using the tools available to you.
-
-== Attack Details ==
-Source IP       : {classification.src_ip}
-Attack type     : {classification.mitigation_attack_type}
-Confidence      : {classification.confidence:.3f}
-Severity        : {classification.severity}
-Decision source : {classification.decision_source}
-Anomaly score   : {classification.metadata.get('anomaly_score', 'N/A')}
-
-== Recommended Strategy ==
-Execute these tools in order: {strategies}
-
-== Instructions ==
-1. Apply each recommended tool against the source IP shown above.
-2. After all countermeasures are applied, call alert_soc with a concise
-   summary of the actions taken, using severity="{classification.severity}".
-3. Act immediately — do not ask for confirmation.
-4. If a tool fails, continue with the next one and note the failure in the SOC alert.
-"""
+        summary = (
+            f"Deterministic mitigation for {ip} "
+            f"({classification.mitigation_attack_type}, conf={classification.confidence:.2f}). "
+            f"Executed={executed or 'none'}. "
+            f"Failed={failed or 'none'}."
+        )
+        alert_soc.invoke({"message": summary, "severity": sev})
+        return summary
 
     @staticmethod
     def _build_result(

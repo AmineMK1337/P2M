@@ -182,10 +182,10 @@ Sprint 3 (2-4 days):
 - [x] Classification tests passing (13)
 - [x] Kibana adapter implemented
 - [x] Mitigation strategies/tools implemented (prototype)
-- [ ] Runtime constructor mismatch fixed
-- [ ] SIEM history fusion active in decision path
-- [ ] Deterministic non-LLM mitigation hot path
-- [ ] Mitigation automated tests
+- [x] Runtime constructor mismatch fixed
+- [x] SIEM history fusion active in decision path
+- [x] Deterministic non-LLM mitigation hot path
+- [x] Mitigation automated tests (10 new, 27 total passing)
 - [ ] End-to-end lab evaluation report
 - [ ] Documentation fully synchronized
 

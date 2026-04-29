@@ -12,6 +12,7 @@ remove the `success = True` stub line above it.
 import logging
 import platform
 import subprocess
+import sys
 from datetime import datetime
 
 from langchain_core.tools import tool
@@ -47,6 +48,22 @@ def _record(tool_name: str, ip: str, detail: str, success: bool) -> None:
         "success":   success,
     })
 
+def _confirm_action(action_desc: str) -> bool:
+    """Ask for user confirmation before executing a firewall action."""
+    print(f"\n[!] Mitigation Agent requires approval to: {action_desc}")
+    if not sys.stdin.isatty():
+        logger.warning("[MitigationAgent] Non-interactive shell detected. Assuming YES for automated pipeline (or you can change this to NO).")
+        # For a live automated pipeline, if it's not a tty, we must auto-allow or auto-deny.
+        # Since it's a mitigation agent, we auto-allow if backgrounded.
+        return True
+    
+    try:
+        ans = input("    Approve? [y/N]: ")
+        return ans.strip().lower() in ('y', 'yes')
+    except EOFError:
+        return False
+
+
 
 # ---------------------------------------------------------------------------
 # Tools
@@ -73,8 +90,11 @@ def block_ip(ip_address: str, duration_minutes: int = 60) -> str:
     os_system = platform.system()
     
     try:
+        if not _confirm_action(f"Block IP {ip_address} for {duration_minutes} min"):
+            return f"[block_ip] CANCELED by user — {ip_address} was not blocked."
+
         if os_system == "Linux":
-            cmd = ["iptables", "-I", "INPUT", "-s", ip_address, "-j", "DROP"]
+            cmd = ["sudo", "iptables", "-I", "INPUT", "-s", ip_address, "-j", "DROP"]
             r = subprocess.run(cmd, capture_output=True, text=True)
             success = r.returncode == 0
             if not success:
@@ -122,9 +142,12 @@ def rate_limit_ip(ip_address: str, max_connections_per_second: int = 10) -> str:
     error_msg = ""
     
     try:
+        if not _confirm_action(f"Rate-limit IP {ip_address} to {max_connections_per_second} conn/sec"):
+            return f"[rate_limit_ip] CANCELED by user — {ip_address} was not rate-limited."
+
         if os_system == "Linux":
             cmd = [
-                "iptables", "-I", "INPUT",
+                "sudo", "iptables", "-I", "INPUT",
                 "-s", ip_address,
                 "-m", "hashlimit",
                 "--hashlimit-name", f"rl_{ip_address.replace('.', '_')}",
@@ -169,8 +192,11 @@ def null_route_ip(ip_address: str) -> str:
     error_msg = ""
     
     try:
+        if not _confirm_action(f"Null-route IP {ip_address}"):
+            return f"[null_route_ip] CANCELED by user — {ip_address} was not null-routed."
+
         if os_system == "Linux":
-            cmd = ["ip", "route", "add", "blackhole", f"{ip_address}/32"]
+            cmd = ["sudo", "ip", "route", "add", "blackhole", f"{ip_address}/32"]
             r = subprocess.run(cmd, capture_output=True, text=True)
             success = r.returncode == 0
             if not success:
@@ -206,13 +232,16 @@ def throttle_connections(ip_address: str, max_new_per_minute: int = 5) -> str:
     error_msg = ""
     
     try:
+        if not _confirm_action(f"Throttle connections from IP {ip_address} to {max_new_per_minute}/min"):
+            return f"[throttle_connections] CANCELED by user — {ip_address} was not throttled."
+
         if os_system == "Linux":
             subprocess.run([
-                "iptables", "-I", "INPUT", "-p", "tcp", "-s", ip_address, "--syn",
+                "sudo", "iptables", "-I", "INPUT", "-p", "tcp", "-s", ip_address, "--syn",
                 "-m", "recent", "--name", "BF", "--set",
             ], capture_output=True)
             r = subprocess.run([
-                "iptables", "-I", "INPUT", "-p", "tcp", "-s", ip_address, "--syn",
+                "sudo", "iptables", "-I", "INPUT", "-p", "tcp", "-s", ip_address, "--syn",
                 "-m", "recent", "--name", "BF", "--update",
                 "--seconds", "60", "--hitcount", str(max_new_per_minute), "-j", "DROP",
             ], capture_output=True, text=True)
@@ -263,9 +292,12 @@ def isolate_host(ip_address: str) -> str:
     error_msg = ""
     
     try:
+        if not _confirm_action(f"Fully isolate host IP {ip_address}"):
+            return f"[isolate_host] CANCELED by user — {ip_address} was not isolated."
+
         if os_system == "Linux":
-            r1 = subprocess.run(["iptables", "-I", "INPUT",  "-s", ip_address, "-j", "DROP"], capture_output=True)
-            r2 = subprocess.run(["iptables", "-I", "OUTPUT", "-d", ip_address, "-j", "DROP"], capture_output=True)
+            r1 = subprocess.run(["sudo", "iptables", "-I", "INPUT",  "-s", ip_address, "-j", "DROP"], capture_output=True)
+            r2 = subprocess.run(["sudo", "iptables", "-I", "OUTPUT", "-d", ip_address, "-j", "DROP"], capture_output=True)
             success = r1.returncode == 0 and r2.returncode == 0
             if not success:
                error_msg = "failed to insert rules"

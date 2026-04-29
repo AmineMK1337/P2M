@@ -170,7 +170,7 @@ async def agent_loop(kibana):
     
     # 1. Determine the active capture mode
     target_csv = "data/flows.csv"
-    watch_dir = os.path.expanduser("~/ands/flows_csv")
+    watch_dir = os.environ.get("FLOW_WATCH_DIR", "data/flows_csv")
     
     is_live = False
     if os.path.exists(watch_dir):

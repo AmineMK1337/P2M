@@ -504,6 +504,7 @@ class DetectionClassificationAgent:
         kibana_window_minutes: int = 10,
         model_threshold_override: Optional[float] = None,
         push_benign_to_kibana: bool = False,
+        use_siem_history: bool = True,
     ):
         self.model = PCAIntrusionModel(model_path, threshold_override=model_threshold_override)
         self.kibana = kibana
@@ -513,17 +514,26 @@ class DetectionClassificationAgent:
         self.threshold = float(threshold)
         self.kibana_window_minutes = int(kibana_window_minutes)
         self.push_benign_to_kibana = push_benign_to_kibana
+        self.use_siem_history = use_siem_history
 
     def process_flow(self, flow: FlowRecord) -> ClassificationResult:
         attack_type, model_conf, anomaly_score = self.model.predict(flow)
         model_flags_attack = attack_type != "BENIGN"
 
-        # Keep final verdict identical to model output (BENIGN vs Intrusion).
+        # SIEM fusion — query historical corroboration when enabled.
         siem_conf = 0.0
         siem_count = 0
         fused_conf = model_conf
         decision_source = "model"
         is_attack = model_flags_attack
+
+        if self.use_siem_history and model_flags_attack:
+            siem_alerts = self.kibana.get_alerts(
+                flow.src_ip or "unknown", attack_type, self.kibana_window_minutes
+            )
+            siem_count = len(siem_alerts)
+            siem_conf = self.kibana.corroboration_score(siem_alerts)
+            fused_conf, decision_source = self.fusion.fuse(model_conf, siem_conf, siem_count)
 
         # Generate reasoning
         reasoning_text, reasoning_details = self.reasoning.generate_reasoning(
