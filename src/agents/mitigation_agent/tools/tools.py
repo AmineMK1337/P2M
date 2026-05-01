@@ -51,6 +51,12 @@ def _record(tool_name: str, ip: str, detail: str, success: bool) -> None:
 def _confirm_action(action_desc: str) -> bool:
     """Ask for user confirmation before executing a firewall action."""
     print(f"\n[!] Mitigation Agent requires approval to: {action_desc}")
+    
+    import os
+    if os.environ.get("AUTO_MITIGATE", "false").lower() in ("true", "1", "yes"):
+        logger.info("[MitigationAgent] AUTO_MITIGATE is enabled. Automatically approving.")
+        return True
+        
     if not sys.stdin.isatty():
         logger.warning("[MitigationAgent] Non-interactive shell detected. Assuming YES for automated pipeline (or you can change this to NO).")
         # For a live automated pipeline, if it's not a tty, we must auto-allow or auto-deny.
