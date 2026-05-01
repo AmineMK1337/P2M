@@ -242,10 +242,40 @@ async def startup_event():
     kibana = _build_siem_adapter()
     asyncio.create_task(agent_loop(kibana))
 
-@app.get("/api/system_state")
-async def get_system_state():
-    return global_state
+@app.get("/api/dashboard")
+async def get_dashboard():
+    return {
+        "traffic": global_state.get("traffic", {}),
+        "features": global_state.get("features", {}),
+        "detection": global_state.get("detection", {}),
+        "decision": global_state.get("decision", {}),
+        "defense": global_state.get("defense", {}),
+        "mitigation": global_state.get("mitigation", {})
+    }
+
+@app.get("/api/system")
+async def get_system():
+    # Return mock system metrics and actual capture state
+    return {
+        "cpu": 14.2,
+        "ram": 41.8,
+        "network": {
+            "bytes_sent": 145020,
+            "bytes_recv": 849000
+        },
+        "state": global_state.get("capture", {}).get("status", "running"),
+        "capture": global_state.get("capture", {})
+    }
 
 @app.get("/api/logs")
 async def get_logs():
-    return "\n".join(global_state["logs"])
+    # Return as JSON rather than raw text
+    return {"logs": global_state.get("logs", [])}
+
+@app.get("/api/agents/status")
+async def get_agents_status():
+    return {
+        "classification_agent": "running",
+        "mitigation_agent": "running",
+        "siem_agent": "running" if _env_bool("USE_SIEM_HISTORY", default=True) else "disabled"
+    }
