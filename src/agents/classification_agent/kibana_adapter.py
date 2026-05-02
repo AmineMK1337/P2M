@@ -5,9 +5,10 @@ Kibana / Elasticsearch history adapter for the classification agent.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 import importlib
 import logging
+import uuid
 
 try:
     from src.shared.schemas import SIEMAlert
@@ -16,11 +17,16 @@ except ModuleNotFoundError:
 
 logger = logging.getLogger(__name__)
 
+FLOWS_INDEX = "network_live_flows"
+ATTACK_HISTORY_INDEX = "confirmed_attack_history"
+
 
 @dataclass
 class KibanaConfig:
     host: str = "http://localhost:9200"
     index: str = "ands-alerts"
+    flows_index: str = FLOWS_INDEX
+    attack_history_index: str = ATTACK_HISTORY_INDEX
     username: Optional[str] = None
     password: Optional[str] = None
     verify_certs: bool = False
@@ -35,7 +41,27 @@ class KibanaAdapterBase(ABC):
 
     @abstractmethod
     def push_alert(self, result) -> bool:
-        """Write a ClassificationResult to Kibana."""
+        """Write a ClassificationResult to the alerts index."""
+
+    @abstractmethod
+    def push_flow(self, result) -> bool:
+        """Write every flow row (attack or benign) to network_live_flows."""
+
+    @abstractmethod
+    def push_confirmed_attack(self, result) -> bool:
+        """Write a confirmed attack event to confirmed_attack_history."""
+
+    @abstractmethod
+    def get_ip_history(self, ip: str) -> dict[str, Any]:
+        """Return attack history summary for an IP from confirmed_attack_history."""
+
+    @abstractmethod
+    def get_same_attack_type_count(self, ip: str, attack_type: str, days: int = 30) -> int:
+        """Count past attacks from ip that match attack_type."""
+
+    @abstractmethod
+    def count_recent_ip_attacks(self, ip: str, days: int = 7) -> int:
+        """Count attacks from ip in the last `days` days."""
 
     @abstractmethod
     def is_available(self) -> bool:
@@ -83,6 +109,8 @@ class KibanaAdapter(KibanaAdapterBase):
             info = self._client.info()
             logger.info("[Kibana] Connected to Elasticsearch: %s", info["version"]["number"])
             self._ensure_index()
+            self._ensure_flow_index()
+            self._ensure_attack_history_index()
         except Exception as exc:
             logger.error("[Kibana] Connection failed: %s", exc)
             self._client = None
@@ -90,12 +118,9 @@ class KibanaAdapter(KibanaAdapterBase):
     def _ensure_index(self):
         if not self._client:
             return
-
         try:
-            exists = self._client.indices.exists(index=self.config.index)
-            if exists:
+            if self._client.indices.exists(index=self.config.index):
                 return
-
             body = {
                 "mappings": {
                     "properties": {
@@ -113,6 +138,66 @@ class KibanaAdapter(KibanaAdapterBase):
             logger.info("[Kibana] Created index: %s", self.config.index)
         except Exception as exc:
             logger.error("[Kibana] Failed to ensure index '%s': %s", self.config.index, exc)
+
+    def _ensure_flow_index(self):
+        if not self._client:
+            return
+        try:
+            if self._client.indices.exists(index=self.config.flows_index):
+                return
+            body = {
+                "mappings": {
+                    "properties": {
+                        "@timestamp":           {"type": "date"},
+                        "src_ip":               {"type": "keyword"},
+                        "dst_ip":               {"type": "keyword"},
+                        "src_port":             {"type": "integer"},
+                        "dst_port":             {"type": "integer"},
+                        "protocol":             {"type": "keyword"},
+                        "packets":              {"type": "long"},
+                        "bytes":                {"type": "long"},
+                        "duration":             {"type": "float"},
+                        "model_prediction":     {"type": "keyword"},
+                        "predicted_attack_type":{"type": "keyword"},
+                        "confidence":           {"type": "float"},
+                        "is_attack":            {"type": "boolean"},
+                        "decision_source":      {"type": "keyword"},
+                        "siem_alert_count":     {"type": "integer"},
+                        "severity":             {"type": "keyword"},
+                        "source":               {"type": "keyword"},
+                    }
+                }
+            }
+            self._client.indices.create(index=self.config.flows_index, body=body)
+            logger.info("[Kibana] Created index: %s", self.config.flows_index)
+        except Exception as exc:
+            logger.error("[Kibana] Failed to ensure index '%s': %s", self.config.flows_index, exc)
+
+    def _ensure_attack_history_index(self):
+        if not self._client:
+            return
+        try:
+            if self._client.indices.exists(index=self.config.attack_history_index):
+                return
+            body = {
+                "mappings": {
+                    "properties": {
+                        "@timestamp":       {"type": "date"},
+                        "src_ip":           {"type": "keyword"},
+                        "attack_type":      {"type": "keyword"},
+                        "severity":         {"type": "keyword"},
+                        "confidence":       {"type": "float"},
+                        "model_confidence": {"type": "float"},
+                        "siem_confidence":  {"type": "float"},
+                        "decision_source":  {"type": "keyword"},
+                        "incident_id":      {"type": "keyword"},
+                    }
+                }
+            }
+            self._client.indices.create(index=self.config.attack_history_index, body=body)
+            logger.info("[Kibana] Created index: %s", self.config.attack_history_index)
+        except Exception as exc:
+            logger.error("[Kibana] Failed to ensure index '%s': %s", self.config.attack_history_index, exc)
 
     def get_alerts(self, src_ip: str, attack_type: str, window_minutes: int) -> list[SIEMAlert]:
         if not self._client:
@@ -166,7 +251,6 @@ class KibanaAdapter(KibanaAdapterBase):
     def push_alert(self, result) -> bool:
         if not self._client:
             return False
-
         try:
             doc = {
                 "@timestamp": datetime.now(timezone.utc).isoformat(),
@@ -183,6 +267,167 @@ class KibanaAdapter(KibanaAdapterBase):
             logger.error("[Kibana] Push failed: %s", exc)
             return False
 
+    def push_flow(self, result) -> bool:
+        if not self._client:
+            return False
+        try:
+            f = result.flow.features
+            doc: dict[str, Any] = {
+                "@timestamp":            datetime.now(timezone.utc).isoformat(),
+                "src_ip":                result.flow.src_ip or "unknown",
+                "dst_ip":                self._feat(f, ("Dst IP", " Dst IP", "dst_ip", "Destination IP")),
+                "src_port":              self._feat_int(f, ("Src Port", " Src Port", "src_port", "Source Port")),
+                "dst_port":              self._feat_int(f, ("Dst Port", " Dst Port", "dst_port", "Destination Port")),
+                "protocol":              self._feat(f, ("Protocol",)),
+                "packets":               self._feat_int(f, ("Tot Fwd Pkts", "Total Fwd Packets", "packets")),
+                "bytes":                 self._feat_int(f, ("TotLen Fwd Pkts", "Total Length of Fwd Packets", "bytes")),
+                "duration":              self._feat_float(f, ("Flow Duration", "duration")),
+                "model_prediction":      "attack" if result.is_attack else "benign",
+                "predicted_attack_type": result.attack_type if result.is_attack else "",
+                "confidence":            float(result.confidence),
+                "is_attack":             bool(result.is_attack),
+                "decision_source":       result.decision_source,
+                "siem_alert_count":      int(result.siem_alert_count),
+                "severity":              result.severity,
+                "source":                result.flow.source,
+            }
+            self._client.index(index=self.config.flows_index, document=doc)
+            return True
+        except Exception as exc:
+            logger.error("[Kibana] push_flow failed: %s", exc)
+            return False
+
+    def push_confirmed_attack(self, result) -> bool:
+        if not self._client:
+            return False
+        try:
+            doc: dict[str, Any] = {
+                "@timestamp":       datetime.now(timezone.utc).isoformat(),
+                "src_ip":           result.flow.src_ip or "unknown",
+                "attack_type":      result.attack_type,
+                "severity":         result.severity,
+                "confidence":       float(result.confidence),
+                "model_confidence": float(result.model_confidence),
+                "siem_confidence":  float(result.siem_confidence),
+                "decision_source":  result.decision_source,
+                "incident_id":      f"INC_{uuid.uuid4().hex[:8].upper()}",
+            }
+            self._client.index(index=self.config.attack_history_index, document=doc)
+            return True
+        except Exception as exc:
+            logger.error("[Kibana] push_confirmed_attack failed: %s", exc)
+            return False
+
+    def get_ip_history(self, ip: str) -> dict[str, Any]:
+        empty: dict[str, Any] = {
+            "previous_attack_count": 0,
+            "first_seen": None,
+            "last_seen": None,
+            "attack_types": [],
+            "recent_attack_count": 0,
+        }
+        if not self._client:
+            return empty
+        try:
+            query = {
+                "size": 0,
+                "query": {"term": {"src_ip": ip}},
+                "aggs": {
+                    "count":       {"value_count": {"field": "src_ip"}},
+                    "first_seen":  {"min": {"field": "@timestamp"}},
+                    "last_seen":   {"max": {"field": "@timestamp"}},
+                    "attack_types":{"terms": {"field": "attack_type", "size": 20}},
+                    "recent": {
+                        "filter": {"range": {"@timestamp": {"gte": f"now-7d/d"}}},
+                        "aggs": {"count": {"value_count": {"field": "src_ip"}}},
+                    },
+                },
+            }
+            resp = self._client.search(index=self.config.attack_history_index, body=query)
+            aggs = resp.get("aggregations", {})
+            return {
+                "previous_attack_count": int(aggs.get("count", {}).get("value", 0)),
+                "first_seen":            aggs.get("first_seen", {}).get("value_as_string"),
+                "last_seen":             aggs.get("last_seen", {}).get("value_as_string"),
+                "attack_types":          [b["key"] for b in aggs.get("attack_types", {}).get("buckets", [])],
+                "recent_attack_count":   int(aggs.get("recent", {}).get("count", {}).get("value", 0)),
+            }
+        except Exception as exc:
+            logger.error("[Kibana] get_ip_history failed for %s: %s", ip, exc)
+            return empty
+
+    def get_same_attack_type_count(self, ip: str, attack_type: str, days: int = 30) -> int:
+        if not self._client:
+            return 0
+        try:
+            query = {
+                "size": 0,
+                "query": {
+                    "bool": {
+                        "must": [
+                            {"term": {"src_ip": ip}},
+                            {"term": {"attack_type": attack_type}},
+                            {"range": {"@timestamp": {"gte": f"now-{days}d/d"}}},
+                        ]
+                    }
+                },
+                "aggs": {"count": {"value_count": {"field": "src_ip"}}},
+            }
+            resp = self._client.search(index=self.config.attack_history_index, body=query)
+            return int(resp.get("aggregations", {}).get("count", {}).get("value", 0))
+        except Exception as exc:
+            logger.error("[Kibana] get_same_attack_type_count failed for %s/%s: %s", ip, attack_type, exc)
+            return 0
+
+    def count_recent_ip_attacks(self, ip: str, days: int = 7) -> int:
+        if not self._client:
+            return 0
+        try:
+            query = {
+                "size": 0,
+                "query": {
+                    "bool": {
+                        "must": [
+                            {"term": {"src_ip": ip}},
+                            {"range": {"@timestamp": {"gte": f"now-{days}d/d"}}},
+                        ]
+                    }
+                },
+                "aggs": {"count": {"value_count": {"field": "src_ip"}}},
+            }
+            resp = self._client.search(index=self.config.attack_history_index, body=query)
+            return int(resp.get("aggregations", {}).get("count", {}).get("value", 0))
+        except Exception as exc:
+            logger.error("[Kibana] count_recent_ip_attacks failed for %s: %s", ip, exc)
+            return 0
+
+    @staticmethod
+    def _feat(features: dict, keys: tuple) -> Optional[str]:
+        for k in keys:
+            if k in features and features[k] is not None:
+                return str(features[k])
+        return None
+
+    @staticmethod
+    def _feat_int(features: dict, keys: tuple) -> Optional[int]:
+        for k in keys:
+            if k in features and features[k] is not None:
+                try:
+                    return int(float(features[k]))
+                except (ValueError, TypeError):
+                    pass
+        return None
+
+    @staticmethod
+    def _feat_float(features: dict, keys: tuple) -> Optional[float]:
+        for k in keys:
+            if k in features and features[k] is not None:
+                try:
+                    return float(features[k])
+                except (ValueError, TypeError):
+                    pass
+        return None
+
     def is_available(self) -> bool:
         return self._client is not None
 
@@ -192,6 +437,8 @@ class StubKibanaAdapter(KibanaAdapterBase):
 
     def __init__(self, preset_alerts: Optional[list[SIEMAlert]] = None):
         self._alerts = preset_alerts or self._default_alerts()
+        self._flows: list[dict[str, Any]] = []
+        self._attack_history: list[dict[str, Any]] = []
         logger.info("[Kibana] Using StubKibanaAdapter.")
 
     @staticmethod
@@ -206,9 +453,8 @@ class StubKibanaAdapter(KibanaAdapterBase):
     def get_alerts(self, src_ip: str, attack_type: str, window_minutes: int) -> list[SIEMAlert]:
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
         matches = [
-            alert
-            for alert in self._alerts
-            if alert.src_ip == src_ip and alert.attack_type == attack_type and alert.timestamp >= cutoff
+            a for a in self._alerts
+            if a.src_ip == src_ip and a.attack_type == attack_type and a.timestamp >= cutoff
         ]
         logger.info("[Kibana:Stub] %s match(es) for %s/%s", len(matches), src_ip, attack_type)
         return matches
@@ -223,6 +469,59 @@ class StubKibanaAdapter(KibanaAdapterBase):
             )
         )
         return True
+
+    def push_flow(self, result) -> bool:
+        self._flows.append({
+            "@timestamp":            datetime.now(timezone.utc).isoformat(),
+            "src_ip":                result.flow.src_ip or "unknown",
+            "model_prediction":      "attack" if result.is_attack else "benign",
+            "predicted_attack_type": result.attack_type if result.is_attack else "",
+            "confidence":            float(result.confidence),
+            "is_attack":             bool(result.is_attack),
+        })
+        return True
+
+    def push_confirmed_attack(self, result) -> bool:
+        self._attack_history.append({
+            "@timestamp":   datetime.now(timezone.utc).isoformat(),
+            "src_ip":       result.flow.src_ip or "unknown",
+            "attack_type":  result.attack_type,
+            "severity":     result.severity,
+            "confidence":   float(result.confidence),
+            "incident_id":  f"INC_{uuid.uuid4().hex[:8].upper()}",
+        })
+        return True
+
+    def get_ip_history(self, ip: str) -> dict[str, Any]:
+        records = [r for r in self._attack_history if r["src_ip"] == ip]
+        if not records:
+            return {"previous_attack_count": 0, "first_seen": None, "last_seen": None,
+                    "attack_types": [], "recent_attack_count": 0}
+        cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+        types = list({r["attack_type"] for r in records})
+        recent = sum(1 for r in records if r["@timestamp"] >= cutoff.isoformat())
+        timestamps = sorted(r["@timestamp"] for r in records)
+        return {
+            "previous_attack_count": len(records),
+            "first_seen":            timestamps[0],
+            "last_seen":             timestamps[-1],
+            "attack_types":          types,
+            "recent_attack_count":   recent,
+        }
+
+    def get_same_attack_type_count(self, ip: str, attack_type: str, days: int = 30) -> int:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        return sum(
+            1 for r in self._attack_history
+            if r["src_ip"] == ip and r["attack_type"] == attack_type and r["@timestamp"] >= cutoff
+        )
+
+    def count_recent_ip_attacks(self, ip: str, days: int = 7) -> int:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        return sum(
+            1 for r in self._attack_history
+            if r["src_ip"] == ip and r["@timestamp"] >= cutoff
+        )
 
     def is_available(self) -> bool:
         return True

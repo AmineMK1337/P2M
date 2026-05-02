@@ -31,3 +31,6 @@ openpyxl==3.1.5
 fastapi>=0.100.0
 uvicorn>=0.23.0
 python-dotenv>=1.0.0
+
+# MCP (Model Context Protocol) server for threat-intel tools
+mcp[cli]>=1.0.0

@@ -575,8 +575,12 @@ class DetectionClassificationAgent:
         )
 
         self._log(result)
-        if self.kibana and (result.is_attack or self.push_benign_to_kibana):
-            self.kibana.push_alert(result)
+        if self.kibana:
+            self.kibana.push_flow(result)
+            if result.is_attack:
+                self.kibana.push_confirmed_attack(result)
+            if result.is_attack or self.push_benign_to_kibana:
+                self.kibana.push_alert(result)
 
         if result.is_attack and self.on_attack:
             self.on_attack(result)
