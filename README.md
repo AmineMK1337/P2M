@@ -62,13 +62,6 @@ Download them from Kaggle and place the extracted CSVs under `data/raw/`:
 
 ### 1) Create and activate a virtual environment
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-```
-
-Windows (PowerShell):
-
 ```powershell
 python -m venv .venv
 & ".\.venv\Scripts\Activate.ps1"
@@ -76,56 +69,89 @@ python -m venv .venv
 
 ### 2) Install dependencies
 
-```bash
-python -m pip install -r requirements.txt
+```powershell
+& ".\.venv\Scripts\python.exe" -m pip install -r requirements.txt
 ```
 
 ### 3) Configure environment variables
 
-Copy `.env.example` to `.env`:
-
-```bash
-cp .env.example .env
-```
-
-Windows (PowerShell):
+Create a `.env` file if you need custom settings:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Then edit `.env` and set real credentials as needed.
+If you are not running Elasticsearch/Kibana yet, disable SIEM fusion while you test the backend:
 
-Notes:
-- Elasticsearch/Kibana is the SIEM backend used by runtime components.
-- Configure `KIBANA_HOST` and `KIBANA_INDEX` so the classifier can fuse model output with Kibana SIEM history.
-- The API/CLI now fail fast if Elasticsearch is unreachable, to avoid silently degrading fusion.
-
-### 4) Run a sample classification
-
-```bash
-python -m src.main --mode csv --csv data/test/test.csv
+```powershell
+$env:USE_SIEM_HISTORY = "false"
 ```
 
-Force Elasticsearch/Kibana explicitly:
+If Elasticsearch is running, keep SIEM enabled and point the app to your cluster:
 
-```bash
-python -m src.main --kibana-host http://localhost:9200 --kibana-index ands-alerts --mode csv --csv data/test/test.csv
+```powershell
+$env:KIBANA_HOST = "http://localhost:9200"
+$env:KIBANA_INDEX = "ands-alerts"
 ```
 
-Windows (venv) equivalent:
+### 4) Run the backend API
+
+This starts the FastAPI backend used by the dashboard and API tests:
+
+```powershell
+& ".\.venv\Scripts\python.exe" -m uvicorn src.api:app --reload --port 8000
+```
+
+If Elasticsearch/Kibana is not available, start it with SIEM disabled:
+
+```powershell
+$env:USE_SIEM_HISTORY = "false"
+& ".\.venv\Scripts\python.exe" -m uvicorn src.api:app --reload --port 8000
+```
+
+### 5) Verify the backend
+
+With the backend running, run the API test script in a second terminal:
+
+```powershell
+& ".\.venv\Scripts\python.exe" scripts/test_backend.py
+```
+
+You can also open these endpoints directly in a browser or with `Invoke-WebRequest`:
+
+- `http://127.0.0.1:8000/api/agents/status`
+- `http://127.0.0.1:8000/api/system`
+- `http://127.0.0.1:8000/api/dashboard`
+
+### 6) Run the CLI classification pipeline
+
+This reads the sample CSV flow file and prints predictions to the terminal:
 
 ```powershell
 & ".\.venv\Scripts\python.exe" -m src.main --mode csv --csv data/test/test.csv
 ```
 
-### 5) Run tests
+If Elasticsearch/Kibana is available, you can connect explicitly:
 
-```bash
-python -m pytest tests/test_intrusion_classification_agent.py -v
+```powershell
+& ".\.venv\Scripts\python.exe" -m src.main --kibana-host http://localhost:9200 --kibana-index ands-alerts --mode csv --csv data/test/test.csv
 ```
 
-Windows (venv) equivalent:
+### 7) Run the MCP server
+
+The MCP threat-intelligence server is separate from the backend API:
+
+```powershell
+& ".\.venv\Scripts\python.exe" -m src.agents.classification_agent.mcp_server
+```
+
+To expose it over HTTP/SSE instead of stdio:
+
+```powershell
+& ".\.venv\Scripts\python.exe" -m src.agents.classification_agent.mcp_server --transport sse --port 9000
+```
+
+### 8) Run tests
 
 ```powershell
 & ".\.venv\Scripts\python.exe" -m pytest tests/test_intrusion_classification_agent.py -v
@@ -145,12 +171,6 @@ The commands below were validated in this workspace on Windows using the project
 
 This runs the classification pipeline on `data/test/test.csv` and prints predictions in the terminal.
 
-```bash
-python -m src.main --mode csv --csv data/test/test.csv
-```
-
-Windows (venv) equivalent:
-
 ```powershell
 & ".\.venv\Scripts\python.exe" -m src.main --mode csv --csv data/test/test.csv
 ```
@@ -163,12 +183,6 @@ Expected behavior:
 
 Run the test suite with:
 
-```bash
-python -m pytest tests/test_intrusion_classification_agent.py -v
-```
-
-Windows (venv) equivalent:
-
 ```powershell
 & ".\.venv\Scripts\python.exe" -m pytest tests/test_intrusion_classification_agent.py -v
 ```
@@ -179,23 +193,11 @@ Current expected result in this repo:
 
 ### 3) Optional: print all test output
 
-```bash
-python -m pytest tests/test_intrusion_classification_agent.py -v -s
-```
-
-Windows (venv) equivalent:
-
 ```powershell
 & ".\.venv\Scripts\python.exe" -m pytest tests/test_intrusion_classification_agent.py -v -s
 ```
 
 ### 4) Optional: save test output to a log file
-
-```bash
-python -m pytest tests/test_intrusion_classification_agent.py -v -s > logs/test_output.txt
-```
-
-Windows (venv) equivalent:
 
 ```powershell
 & ".\.venv\Scripts\python.exe" -m pytest tests/test_intrusion_classification_agent.py -v -s > logs/test_output.txt
@@ -205,12 +207,6 @@ Windows (venv) equivalent:
 
 If you retrain/rebuild data artifacts and want attack-type fallback metadata in
 `deployments/models/pca_intrusion_detector.joblib`, run:
-
-```bash
-python scripts/build_attack_type_centroids.py --model deployments/models/pca_intrusion_detector.joblib
-```
-
-Windows (venv) equivalent:
 
 ```powershell
 & ".\.venv\Scripts\python.exe" scripts/build_attack_type_centroids.py --model deployments/models/pca_intrusion_detector.joblib

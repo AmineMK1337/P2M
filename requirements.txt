@@ -32,5 +32,7 @@ fastapi>=0.100.0
 uvicorn>=0.23.0
 python-dotenv>=1.0.0
 
-# MCP (Model Context Protocol) server for threat-intel tools
-mcp[cli]>=1.0.0
+# MCP Python client — used by tests to connect to the Elasticsearch MCP server
+# The MCP server itself is the official Elastic one, run via Node.js:
+#   ES_URL=http://localhost:9200 npx @elastic/mcp-server-elasticsearch
+mcp>=1.0.0
