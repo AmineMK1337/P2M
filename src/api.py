@@ -12,18 +12,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 try:
     from src.agents.classification_agent.agent import FlowInputConfig, DetectionClassificationAgent, get_flow_stream
-    from src.agents.classification_agent.kibana_adapter import (
-        KibanaAdapter,
-        KibanaConfig,
-    )
+    from src.agents.classification_agent.kibana_adapter import KibanaAdapter, KibanaConfig
+    from src.agents.classification_agent.verification_agent import VerificationAgent
     from src.agents.mitigation_agent.agent import MitigationAgent
     from src.shared.schemas import ClassificationResult
 except ModuleNotFoundError:
     from agents.classification_agent.agent import FlowInputConfig, DetectionClassificationAgent, get_flow_stream
-    from agents.classification_agent.kibana_adapter import (
-        KibanaAdapter,
-        KibanaConfig,
-    )
+    from agents.classification_agent.kibana_adapter import KibanaAdapter, KibanaConfig
+    from agents.classification_agent.verification_agent import VerificationAgent
     from agents.mitigation_agent.agent import MitigationAgent
     from shared.schemas import ClassificationResult
 
@@ -136,7 +132,9 @@ def update_global_state(result: ClassificationResult):
         "model_confidence": result.model_confidence,
         "siem_confidence": result.siem_confidence,
         "attack_type": result.attack_type,
-        "reasoning": result.reasoning
+        "reasoning": result.reasoning,
+        "verification_score": result.verification_score,
+        "verification_verdict": result.verification_verdict,
     }
     
     global_state["decision"] = {
@@ -177,6 +175,8 @@ async def agent_loop(kibana):
         f"[API] SIEM backend active: {kibana.__class__.__name__} (history_fusion={'on' if use_siem_history else 'off'})"
     )
     
+    verification_agent = VerificationAgent(kibana) if kibana else None
+
     agent = DetectionClassificationAgent(
         model_path="deployments/models/pca_intrusion_detector.joblib",
         kibana=kibana,
@@ -185,6 +185,7 @@ async def agent_loop(kibana):
         push_benign_to_kibana=save_benign,
         kibana_window_minutes=siem_window,
         use_siem_history=use_siem_history,
+        verification_agent=verification_agent,
     )
     
     # 1. Determine the active capture mode

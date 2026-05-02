@@ -15,9 +15,11 @@ import pandas as pd
 
 try:
     from src.agents.classification_agent.kibana_adapter import KibanaAdapterBase
+    from src.agents.classification_agent.verification_agent import VerificationAgent
     from src.shared.schemas import ClassificationResult, FlowRecord
 except ModuleNotFoundError:
     from agents.classification_agent.kibana_adapter import KibanaAdapterBase
+    from agents.classification_agent.verification_agent import VerificationAgent
     from shared.schemas import ClassificationResult, FlowRecord
 
 logger = logging.getLogger(__name__)
@@ -505,6 +507,7 @@ class DetectionClassificationAgent:
         model_threshold_override: Optional[float] = None,
         push_benign_to_kibana: bool = False,
         use_siem_history: bool = True,
+        verification_agent: Optional[VerificationAgent] = None,
     ):
         self.model = PCAIntrusionModel(model_path, threshold_override=model_threshold_override)
         self.kibana = kibana
@@ -515,6 +518,7 @@ class DetectionClassificationAgent:
         self.kibana_window_minutes = int(kibana_window_minutes)
         self.push_benign_to_kibana = push_benign_to_kibana
         self.use_siem_history = use_siem_history
+        self.verification_agent = verification_agent
 
     def process_flow(self, flow: FlowRecord) -> ClassificationResult:
         attack_type, model_conf, anomaly_score = self.model.predict(flow)
@@ -574,6 +578,10 @@ class DetectionClassificationAgent:
             },
         )
 
+        # Verification runs before Kibana push so stored docs include verdict
+        if result.is_attack and self.verification_agent:
+            result = self.verification_agent.verify(result)
+
         self._log(result)
         if self.kibana:
             self.kibana.push_flow(result)
@@ -597,9 +605,13 @@ class DetectionClassificationAgent:
 
     def _log(self, result: ClassificationResult):
         if result.is_attack:
+            verification_line = (
+                f"\n  Verification:  score={result.verification_score:.3f}  [{result.verification_verdict}]"
+                if result.verification_verdict else ""
+            )
             logger.warning(
                 "[ClassificationAgent] ATTACK type=%s fused=%.3f model=%.3f siem=%.3f alerts=%s source=%s ip=%s\n"
-                "  Reasoning: %s\n"
+                "  Reasoning: %s%s\n"
                 "  Recommended Actions: %s",
                 result.attack_type,
                 result.confidence,
@@ -609,6 +621,7 @@ class DetectionClassificationAgent:
                 result.decision_source,
                 result.flow.src_ip,
                 result.reasoning,
+                verification_line,
                 ", ".join(result.recommended_actions),
             )
         else:

@@ -13,17 +13,13 @@ from pathlib import Path
 
 try:
 	from src.agents.classification_agent.agent import FlowInputConfig, DetectionClassificationAgent
-	from src.agents.classification_agent.kibana_adapter import (
-		KibanaAdapter,
-		KibanaConfig,
-	)
+	from src.agents.classification_agent.kibana_adapter import KibanaAdapter, KibanaConfig
+	from src.agents.classification_agent.verification_agent import VerificationAgent
 	from src.agents.mitigation_agent.agent import MitigationAgent
 except ModuleNotFoundError:
 	from agents.classification_agent.agent import FlowInputConfig, DetectionClassificationAgent
-	from agents.classification_agent.kibana_adapter import (
-		KibanaAdapter,
-		KibanaConfig,
-	)
+	from agents.classification_agent.kibana_adapter import KibanaAdapter, KibanaConfig
+	from agents.classification_agent.verification_agent import VerificationAgent
 	from agents.mitigation_agent.agent import MitigationAgent
 
 
@@ -108,6 +104,7 @@ def main():
 	)
 
 	mitigation_agent = MitigationAgent()
+	verification_agent = VerificationAgent(kibana)
 
 	agent = DetectionClassificationAgent(
 		model_path=args.model,
@@ -118,6 +115,7 @@ def main():
 		model_threshold_override=args.model_threshold,
 		push_benign_to_kibana=args.kibana_save_all,
 		use_siem_history=bool(args.use_siem_history),
+		verification_agent=verification_agent,
 	)
 
 	agent.run(input_config)

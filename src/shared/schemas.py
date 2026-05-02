@@ -59,9 +59,13 @@ class ClassificationResult:
     mitigation_status: str = "pending"
     
     # Reasoning and acting fields
-    reasoning: str = ""  # Explanation of why this decision was made
-    recommended_actions: list[str] = field(default_factory=list)  # Recommended mitigations
-    reasoning_details: dict[str, Any] = field(default_factory=dict)  # Detailed reasoning breakdown
+    reasoning: str = ""
+    recommended_actions: list[str] = field(default_factory=list)
+    reasoning_details: dict[str, Any] = field(default_factory=dict)
+
+    # Verification layer — populated by VerificationAgent
+    verification_score: float = 0.0    # 0.0 = not verified / benign
+    verification_verdict: str = ""     # empty = not verified
 
     @property
     def src_ip(self) -> str:
