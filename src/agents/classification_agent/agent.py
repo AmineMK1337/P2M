@@ -343,10 +343,10 @@ class PCAIntrusionModel:
         df = df.apply(pd.to_numeric, errors="coerce").fillna(0)
         return df
 
-    def predict(self, flow: FlowRecord) -> tuple[str, float, float]:
+    def predict(self, flow: FlowRecord) -> tuple[str, float]:
         """
-        Returns (attack_type, model_confidence, score).
-        attack_type is BENIGN or a specific attack type when available.
+        Returns (attack_type, anomaly_score).
+        Confidence is computed by ReasoningEngine.assess_model_confidence.
         """
         X_df = self._prepare(flow)
         x_scaled = self.scaler.transform(X_df)
@@ -357,15 +357,7 @@ class PCAIntrusionModel:
         is_benign = score < self.threshold
         attack_type = "BENIGN" if is_benign else self._predict_attack_type(flow=flow, x_df=X_df, x_scaled=x_scaled)
 
-        eps = 1e-9
-        if is_benign:
-            benign_ratio = max(0.0, min(1.0, 1.0 - (score / (self.threshold + eps))))
-            confidence = 0.5 + 0.5 * benign_ratio
-        else:
-            attack_ratio = max(0.0, min(1.0, (score - self.threshold) / (self.threshold + eps)))
-            confidence = 0.5 + 0.5 * attack_ratio
-
-        return attack_type, float(confidence), score
+        return attack_type, score
 
 
 class FusionEngine:
@@ -413,6 +405,63 @@ class ReasoningEngine:
         except Exception as exc:
             logger.warning("[ReasoningEngine] LLM invocation failed, using fallback: %s", exc)
             return ""
+
+    def assess_model_confidence(
+        self,
+        anomaly_score: float,
+        threshold: float,
+        is_attack: bool,
+        attack_type: str,
+    ) -> float:
+        """
+        Ask ZySec to assess a calibrated confidence score (0.0–1.0) for the PCA
+        anomaly result. Falls back to the heuristic formula when Ollama is unavailable
+        or returns an unparseable response.
+        """
+        prompt = (
+            "You are a network security AI evaluating a PCA-based anomaly detector output.\n\n"
+            f"- Decision: {'ATTACK (' + attack_type + ')' if is_attack else 'BENIGN'}\n"
+            f"- Reconstruction error (anomaly score): {anomaly_score:.6f}\n"
+            f"- Detection threshold: {threshold:.6f}\n"
+            f"- Score / threshold ratio: {anomaly_score / (threshold + 1e-9):.3f}\n\n"
+            "Based on how far the anomaly score deviates from the threshold, estimate a "
+            "confidence probability between 0.0 and 1.0 that the decision is correct. "
+            "A score exactly at the threshold means high uncertainty (near 0.5). "
+            "A score far above the threshold for an attack, or far below for benign, means high confidence (near 1.0).\n\n"
+            "Respond ONLY with a valid JSON object — no markdown, no extra text:\n"
+            '{"confidence": <float between 0.0 and 1.0>}'
+        )
+
+        output = self._invoke(prompt)
+        if output:
+            start = output.find("{")
+            end = output.rfind("}")
+            if start != -1 and end != -1:
+                try:
+                    data = json.loads(output[start : end + 1])
+                    raw = data.get("confidence")
+                    if raw is not None:
+                        value = float(raw)
+                        if 0.0 <= value <= 1.0:
+                            logger.debug(
+                                "[ReasoningEngine] ZySec confidence=%.3f for %s (score=%.6f, threshold=%.6f)",
+                                value, attack_type, anomaly_score, threshold,
+                            )
+                            return value
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    pass
+
+        return self._heuristic_confidence(anomaly_score, threshold, is_attack)
+
+    @staticmethod
+    def _heuristic_confidence(anomaly_score: float, threshold: float, is_attack: bool) -> float:
+        """Linear mapping of anomaly score distance from threshold into [0.5, 1.0]."""
+        eps = 1e-9
+        if is_attack:
+            ratio = max(0.0, min(1.0, (anomaly_score - threshold) / (threshold + eps)))
+        else:
+            ratio = max(0.0, min(1.0, 1.0 - (anomaly_score / (threshold + eps))))
+        return 0.5 + 0.5 * ratio
 
     def _build_prompt(
         self,
@@ -639,8 +688,14 @@ class DetectionClassificationAgent:
         self.verification_agent = verification_agent
 
     def process_flow(self, flow: FlowRecord) -> ClassificationResult:
-        attack_type, model_conf, anomaly_score = self.model.predict(flow)
+        attack_type, anomaly_score = self.model.predict(flow)
         model_flags_attack = attack_type != "BENIGN"
+        model_conf = self.reasoning.assess_model_confidence(
+            anomaly_score=anomaly_score,
+            threshold=self.model.threshold,
+            is_attack=model_flags_attack,
+            attack_type=attack_type,
+        )
 
         # SIEM fusion — query historical corroboration when enabled.
         siem_conf = 0.0
