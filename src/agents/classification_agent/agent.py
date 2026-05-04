@@ -379,10 +379,114 @@ class FusionEngine:
 
 
 class ReasoningEngine:
-    """Generates human-readable reasoning for classification decisions."""
+    """LLM-powered reasoning using ZySec via Ollama, with deterministic fallback."""
 
-    @staticmethod
+    ZYSEC_MODEL = "hf.co/ZySec-AI/ZySec-7B-GGUF:latest"
+    OLLAMA_BASE_URL = "http://localhost:11434"
+
+    def __init__(self, model: str = ZYSEC_MODEL, ollama_base_url: str = OLLAMA_BASE_URL):
+        self.model = model
+        self.ollama_base_url = ollama_base_url
+        self._cached_actions: list[str] = []
+        self._llm = self._init_llm()
+
+    def _init_llm(self) -> Any:
+        try:
+            from langchain_ollama import OllamaLLM
+            llm = OllamaLLM(
+                model=self.model,
+                base_url=self.ollama_base_url,
+                temperature=0.1,
+                num_predict=512,
+            )
+            logger.info("[ReasoningEngine] ZySec LLM ready (model=%s)", self.model)
+            return llm
+        except Exception as exc:
+            logger.warning("[ReasoningEngine] Could not initialize ZySec LLM, will use fallback: %s", exc)
+            return None
+
+    def _invoke(self, prompt: str) -> str:
+        if self._llm is None:
+            return ""
+        try:
+            return self._llm.invoke(prompt)
+        except Exception as exc:
+            logger.warning("[ReasoningEngine] LLM invocation failed, using fallback: %s", exc)
+            return ""
+
+    def _build_prompt(
+        self,
+        is_attack: bool,
+        attack_type: str,
+        confidence: float,
+        model_confidence: float,
+        siem_confidence: float,
+        siem_alert_count: int,
+        anomaly_score: float,
+        threshold: float,
+        decision_source: str,
+    ) -> str:
+        decision = "ATTACK" if is_attack else "BENIGN"
+        siem_info = (
+            f"{siem_alert_count} corroborating SIEM alert(s) at {siem_confidence:.1%} confidence"
+            if siem_alert_count > 0 else "no SIEM corroboration"
+        )
+        return (
+            "You are a network security analyst AI. Analyze this network traffic classification.\n\n"
+            "Classification result:\n"
+            f"- Decision: {decision}\n"
+            f"- Attack type: {attack_type}\n"
+            f"- Overall confidence: {confidence:.1%}\n"
+            f"- Model confidence: {model_confidence:.1%}\n"
+            f"- Anomaly score: {anomaly_score:.4f} (threshold: {threshold:.4f})\n"
+            f"- SIEM: {siem_info}\n"
+            f"- Decision source: {decision_source}\n\n"
+            "Respond ONLY with a valid JSON object — no markdown, no extra text:\n"
+            '{"reasoning": "<2-3 sentence explanation>", "actions": ["<action1>", "<action2>"]}\n\n'
+            "Valid action values: monitor_only, block_immediately, rate_limit, log_for_investigation, "
+            "monitor_closely, enable_syn_flood_protection, increase_connection_limits, block_scanner, "
+            "enable_port_scanning_alerts, enforce_rate_limiting_on_auth, enable_account_lockout, "
+            "enable_waf, sanitize_inputs, block_permanently, threat_intelligence_update, "
+            "isolate_host, enable_full_packet_capture"
+        )
+
+    def _parse_llm_output(
+        self,
+        output: str,
+        is_attack: bool,
+        attack_type: str,
+        confidence: float,
+        model_confidence: float,
+        siem_confidence: float,
+        siem_alert_count: int,
+        anomaly_score: float,
+        threshold: float,
+        decision_source: str,
+    ) -> tuple[str, list[str]]:
+        if output:
+            start = output.find("{")
+            end = output.rfind("}")
+            if start != -1 and end != -1:
+                try:
+                    data = json.loads(output[start : end + 1])
+                    reasoning = str(data.get("reasoning", "")).strip()
+                    raw_actions = data.get("actions", [])
+                    actions = [str(a).strip() for a in raw_actions if a] if isinstance(raw_actions, list) else []
+                    if reasoning:
+                        return reasoning, actions or self._fallback_actions(is_attack, attack_type, confidence)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+        return (
+            self._fallback_reasoning(
+                is_attack, attack_type, confidence, model_confidence,
+                siem_confidence, siem_alert_count, anomaly_score, threshold, decision_source,
+            ),
+            self._fallback_actions(is_attack, attack_type, confidence),
+        )
+
     def generate_reasoning(
+        self,
         is_attack: bool,
         attack_type: str,
         confidence: float,
@@ -393,10 +497,6 @@ class ReasoningEngine:
         threshold: float,
         decision_source: str,
     ) -> tuple[str, dict[str, Any]]:
-        """
-        Generates a reasoning explanation and detailed breakdown.
-        Returns (reasoning_text, reasoning_details_dict).
-        """
         details: dict[str, Any] = {
             "decision": "attack" if is_attack else "benign",
             "confidence_score": round(confidence, 3),
@@ -405,91 +505,109 @@ class ReasoningEngine:
 
         if is_attack:
             if decision_source == "model":
-                reasoning = (
-                    f"Classified as {attack_type} (confidence: {confidence:.1%}) based on PCA anomaly detection. "
-                    f"Anomaly score {anomaly_score:.4f} exceeds threshold {threshold:.4f} by "
-                    f"{((anomaly_score - threshold) / threshold * 100):.1f}%, indicating behavioral deviation from normal traffic."
-                )
                 details["anomaly_breakdown"] = {
                     "score": round(anomaly_score, 4),
                     "threshold": round(threshold, 4),
                     "deviation_percent": round(((anomaly_score - threshold) / threshold * 100), 1),
                 }
             elif decision_source == "model+siem":
-                reasoning = (
-                    f"Classified as {attack_type} (confidence: {confidence:.1%}). "
-                    f"Model signals attack with {model_confidence:.1%} confidence (anomaly score: {anomaly_score:.4f}). "
-                    f"SIEM corroborates with {siem_alert_count} recent alert(s) matching this attack type and source ({siem_confidence:.1%} confidence)."
-                )
                 details["model_signal"] = round(model_confidence, 3)
                 details["siem_signal"] = {
                     "confidence": round(siem_confidence, 3),
                     "recent_alerts": siem_alert_count,
                 }
-            else:  # "siem"
-                reasoning = (
-                    f"Re-classified as {attack_type} based on SIEM historical context ({siem_confidence:.1%} confidence, {siem_alert_count} recent alerts). "
-                    f"Model had lower confidence, but SIEM history shows this source repeatedly flagged for same attack type."
-                )
+            else:
                 details["siem_override"] = {
                     "confidence": round(siem_confidence, 3),
                     "alert_count": siem_alert_count,
                 }
         else:
-            reasoning = (
-                f"Classified as {attack_type} (confidence: {confidence:.1%}). "
-                f"Anomaly score {anomaly_score:.4f} is within normal range (threshold: {threshold:.4f}). "
-                f"Traffic patterns are consistent with benign network activity."
-            )
             details["anomaly_breakdown"] = {
                 "score": round(anomaly_score, 4),
                 "threshold": round(threshold, 4),
                 "margin_to_threshold": round((threshold - anomaly_score), 4),
             }
 
-        return reasoning, details
+        prompt = self._build_prompt(
+            is_attack, attack_type, confidence, model_confidence,
+            siem_confidence, siem_alert_count, anomaly_score, threshold, decision_source,
+        )
+        llm_output = self._invoke(prompt)
+        reasoning_text, self._cached_actions = self._parse_llm_output(
+            llm_output, is_attack, attack_type, confidence, model_confidence,
+            siem_confidence, siem_alert_count, anomaly_score, threshold, decision_source,
+        )
+
+        return reasoning_text, details
+
+    def recommend_actions(self, is_attack: bool, attack_type: str, confidence: float) -> list[str]:
+        if self._cached_actions:
+            actions = self._cached_actions
+            self._cached_actions = []
+            return actions
+        return self._fallback_actions(is_attack, attack_type, confidence)
 
     @staticmethod
-    def recommend_actions(is_attack: bool, attack_type: str, confidence: float) -> list[str]:
-        """
-        Suggests mitigation actions based on classification result.
-        """
-        actions: list[str] = []
+    def _fallback_reasoning(
+        is_attack: bool,
+        attack_type: str,
+        confidence: float,
+        model_confidence: float,
+        siem_confidence: float,
+        siem_alert_count: int,
+        anomaly_score: float,
+        threshold: float,
+        decision_source: str,
+    ) -> str:
+        if is_attack:
+            if decision_source == "model":
+                return (
+                    f"Classified as {attack_type} (confidence: {confidence:.1%}) based on PCA anomaly detection. "
+                    f"Anomaly score {anomaly_score:.4f} exceeds threshold {threshold:.4f} by "
+                    f"{((anomaly_score - threshold) / threshold * 100):.1f}%, indicating behavioral deviation from normal traffic."
+                )
+            if decision_source == "model+siem":
+                return (
+                    f"Classified as {attack_type} (confidence: {confidence:.1%}). "
+                    f"Model signals attack with {model_confidence:.1%} confidence (anomaly score: {anomaly_score:.4f}). "
+                    f"SIEM corroborates with {siem_alert_count} recent alert(s) ({siem_confidence:.1%} confidence)."
+                )
+            return (
+                f"Re-classified as {attack_type} based on SIEM historical context "
+                f"({siem_confidence:.1%} confidence, {siem_alert_count} recent alerts). "
+                "Model had lower confidence, but SIEM history shows this source repeatedly flagged for the same attack type."
+            )
+        return (
+            f"Classified as {attack_type} (confidence: {confidence:.1%}). "
+            f"Anomaly score {anomaly_score:.4f} is within normal range (threshold: {threshold:.4f}). "
+            "Traffic patterns are consistent with benign network activity."
+        )
 
+    @staticmethod
+    def _fallback_actions(is_attack: bool, attack_type: str, confidence: float) -> list[str]:
         if not is_attack:
             return ["monitor_only"]
 
-        # High confidence attacks — take immediate action
         if confidence >= 0.75:
-            actions.append("block_immediately")
-            actions.append("log_for_investigation")
+            actions = ["block_immediately", "log_for_investigation"]
         elif confidence >= 0.6:
-            actions.append("rate_limit")
-            actions.append("log_for_investigation")
+            actions = ["rate_limit", "log_for_investigation"]
         else:
-            actions.append("monitor_closely")
-            actions.append("log_for_investigation")
+            actions = ["monitor_closely", "log_for_investigation"]
 
-        # Attack-specific recommendations
         attack_lower = (attack_type or "").lower().strip()
         if "ddos" in attack_lower or "syn" in attack_lower:
-            actions.append("enable_syn_flood_protection")
-            actions.append("increase_connection_limits")
+            actions += ["enable_syn_flood_protection", "increase_connection_limits"]
         elif "portscan" in attack_lower or "port scan" in attack_lower:
-            actions.append("block_scanner")
-            actions.append("enable_port_scanning_alerts")
+            actions += ["block_scanner", "enable_port_scanning_alerts"]
         elif "bruteforce" in attack_lower or "brute force" in attack_lower:
-            actions.append("enforce_rate_limiting_on_auth")
-            actions.append("enable_account_lockout")
+            actions += ["enforce_rate_limiting_on_auth", "enable_account_lockout"]
         elif "web attack" in attack_lower:
-            actions.append("enable_waf")
-            actions.append("sanitize_inputs")
+            actions += ["enable_waf", "sanitize_inputs"]
         elif "botnet" in attack_lower:
-            actions.append("block_permanently")
-            actions.append("threat_intelligence_update")
+            actions += ["block_permanently", "threat_intelligence_update"]
         elif "infiltration" in attack_lower:
-            actions.append("isolate_host")
-            actions.append("enable_full_packet_capture")
+            actions += ["isolate_host", "enable_full_packet_capture"]
 
         return actions
 
