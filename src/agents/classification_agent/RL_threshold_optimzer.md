@@ -5,8 +5,40 @@ The Q-learning optimizer is designed to dynamically adjust the system's decision
 
 Based on these metrics, it decides whether to raise or lower strictness. The adjusted thresholds are written directly to the policy configuration, and the `PolicyEngine` reloads them immediately.
 
+## System Architecture Flow
+
+The complete feedback loop that updates our parameters looks like this:
+
+```text
+                ┌────────────────────┐
+                │   ML Classifier    │
+                │ attack + confidence│
+                └─────────┬──────────┘
+                          │
+                ┌─────────▼──────────┐
+                │   SIEM Fusion      │
+                └─────────┬──────────┘
+                          │
+                ┌─────────▼──────────┐
+                │   Policy Engine    │<────────────┐
+                │ threshold decisions│             │
+                └─────────┬──────────┘             │
+                          │                        │
+                     mitigation/logging            │
+                          │                        │
+                ┌─────────▼──────────┐             │
+                │ Reward Collector   │             │
+                │ FP/FN/Success stats│             │
+                └─────────┬──────────┘             │
+                          │                        │
+                ┌─────────▼──────────┐             │
+                │ RL Policy Optimizer│─────────────┘
+                │(updates thresholds)│
+                └────────────────────┘
+```
+
 ## How the Thresholds Are Updated
-The RL optimizer modifies four key thresholds, strictly keeping them within safe operating bounds to prevent runaway behavior:
+The RL optimizer modifies four key thresholds, strictly keeping them within safe operating bounds to prevent runaway behavior. **These thresholds are continuously updated every 10 minutes (approximately every 100 network flows):**
 1. **model_high_confidence** (Safe range: `0.75 - 0.95`): Increment/Decrement by 0.01 per step.
 2. **model_trust_floor** (Safe range: `0.35 - 0.65`): Increment/Decrement by 0.01 per step.
 3. **siem_corroboration_min** (Safe range: `0.55 - 0.90`): Increment/Decrement by 0.01 per step.
@@ -35,4 +67,42 @@ $$ Q_{new}(s_t, a_t) = Q(s_t, a_t) + \alpha \cdot \Big[R_{t+1} + \gamma \cdot \m
 ## Pertinent Files
 - **`src/learning/rl_policy_optimizer.py`**: Contains the core logic for the Q-learning optimization. It defines the safe bounds, calculates the rewards from recent system metrics, fetches data, executes the RL update cycle, and re-writes the configuration.
 - **`config/incident_policy.yaml`**: The configuration file that gets periodically modified by the optimizer to reflect the latest tuned threshold values. These values are immediately consumed by the system to adjust classification strictness.
+  - **`decision_policy` section:** This mapping inside the YAML explicitly defines the current RL-tuned classification rules.
+    - `model_trust_floor`: The absolute minimum model confidence where the system will even *consider* the flow. Below this, it is discarded immediately.
+    - `model_high_confidence`: The threshold where the model is so certain it's an attack that it doesn't need SIEM corroboration to confirm it.
+    - `siem_corroboration_min`: The required minimum SIEM confidence when the model score falls into the "unsure" zone (between trust floor and high confidence).
+    - `suspicious_escalate_count`: The number of times an IP can perform low-level anomalous behavior before the system escalates it to a confirmed threat.
+
 - **`logs/rl_qtable.json`**: The memory object (Q-table) serialized as JSON. It stores weights and historical value scores assigned to specific (State, Action) combos so the agent can learn to act intelligently across system restarts.
+  - **Understanding the Q-Table Matrix:**
+    An entry in the database looks like this:
+    ```json
+    {
+      "(0, 0, 0, 2, 1)": {
+        "0": 0.0, "1": 0.0, "2": 0.0, "3": 0.0,
+        "4": 0.0, "5": 0.0, "6": 0.0, "7": 0.0, "8": 0.0
+      }
+    }
+    ```
+    - **The Key (The State)** e.g., `"(0, 0, 0, 2, 1)"`: Represents the discretized metrics snapshot. The metrics are binned into levels (0=Low, 1=Medium, 2=High) mapping to `(SuspiciousRate, FPRate, FNRate, AvgModelConfidence, AvgSIEMConfidence)`. In this example: Low errors, High model confidence, Medium SIEM confidence.
+    - **The Inner Keys (The Actions)** `"0"` through `"8"`: Represent the 9 possible actions the agent can take (e.g., `"0"` increases `model_high_confidence`, `"8"` means do nothing).
+    
+            if action == 0:
+                    thresholds["model_high_confidence"] += 0.01
+                elif action == 1:
+                    thresholds["model_high_confidence"] -= 0.01
+                elif action == 2:
+                    thresholds["model_trust_floor"] += 0.01
+                elif action == 3:
+                    thresholds["model_trust_floor"] -= 0.01
+                elif action == 4:
+                    thresholds["siem_corroboration_min"] += 0.01
+                elif action == 5:
+                    thresholds["siem_corroboration_min"] -= 0.01
+                elif action == 6:
+                    thresholds["suspicious_escalate_count"] += 1
+                elif action == 7:
+                    thresholds["suspicious_escalate_count"] -= 1
+                # action == 8: no change
+
+    - **The Values (The Q-Values)** e.g., `0.0`: The learned expected reward for taking that action in that state. As the system runs and evaluates the choices, these floats will rise for good actions and drop to negative numbers for bad ones, guiding the agent's future choices.
