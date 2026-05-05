@@ -39,10 +39,10 @@ The complete feedback loop that updates our parameters looks like this:
 
 ## How the Thresholds Are Updated
 The RL optimizer modifies four key thresholds, strictly keeping them within safe operating bounds to prevent runaway behavior. **These thresholds are continuously updated every 10 minutes (approximately every 100 network flows):**
-1. **model_high_confidence** (Safe range: `0.75 - 0.95`): Increment/Decrement by 0.01 per step.
-2. **model_trust_floor** (Safe range: `0.35 - 0.65`): Increment/Decrement by 0.01 per step.
-3. **siem_corroboration_min** (Safe range: `0.55 - 0.90`): Increment/Decrement by 0.01 per step.
-4. **suspicious_escalate_count** (Safe range: `2 - 6`): Increment/Decrement by 1 per step.
+1. **model_high_confidence** : Increment/Decrement by 0.01 per step.
+2. **model_trust_floor** : Increment/Decrement by 0.01 per step.
+3. **siem_corroboration_min** : Increment/Decrement by 0.01 per step.
+4. **suspicious_escalate_count** : Increment/Decrement by 1 per step.
 
 ### The Update Cycle:
 1. **Fetch Metrics**: The agent pulls recent decision patterns from Elasticsearch (or a local fallback), tracking true positives (TP), false positives (FP), false negatives (FN), average confidence rates, and suspicious activity rates.
