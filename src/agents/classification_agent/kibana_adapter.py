@@ -129,6 +129,7 @@ class KibanaAdapter(KibanaAdapterBase):
                         "attack_type": {"type": "keyword"},
                         "confidence": {"type": "float"},
                         "is_attack": {"type": "boolean"},
+                        "suspicious": {"type": "boolean"},
                         "decision_source": {"type": "keyword"},
                         "siem_alert_count": {"type": "integer"},
                     }
@@ -258,6 +259,7 @@ class KibanaAdapter(KibanaAdapterBase):
                 "attack_type": result.attack_type,
                 "confidence": float(result.confidence),
                 "is_attack": bool(result.is_attack),
+                "suspicious": bool(getattr(result, "suspicious", False)),
                 "decision_source": result.decision_source,
                 "siem_alert_count": int(result.siem_alert_count),
             }
@@ -466,6 +468,11 @@ class StubKibanaAdapter(KibanaAdapterBase):
                 attack_type=result.attack_type,
                 confidence=float(result.confidence),
                 timestamp=datetime.now(timezone.utc),
+                raw={
+                    "is_attack": bool(result.is_attack),
+                    "suspicious": bool(getattr(result, "suspicious", False)),
+                    "decision_source": result.decision_source,
+                },
             )
         )
         return True

@@ -1,0 +1,22 @@
+decision_policy:
+  model_trust_floor: 0.5
+  model_high_confidence: 0.86
+  siem_corroboration_min: 0.7
+  siem_alert_count_min: 2
+  verification:
+    confirmed_threshold: 0.8
+    suspicious_threshold: 0.5
+    low_evidence_threshold: 0.2
+  suspicious_state:
+    recheck_after_minutes: 10
+    escalate_if_count: 3
+retention:
+  evidence_days: 90
+  alert_days: 30
+notification:
+  soc_webhook_url: ''
+  soc_severity_minimum: medium
+containment:
+  auto_mitigate: false
+  block_duration_minutes: 60
+  unblock_after_minutes: 1440

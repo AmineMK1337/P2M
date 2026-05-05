@@ -360,14 +360,90 @@ class PCAIntrusionModel:
         return attack_type, score
 
 
-class FusionEngine:
-    def fuse(self, model_confidence: float, siem_confidence: float, siem_alert_count: int) -> tuple[float, str]:
-        if siem_alert_count == 0 or siem_confidence == 0.0:
-            return model_confidence, "model"
+class SuspiciousStateTracker:
+    """
+    Tracks SUSPICIOUS decisions per source IP within a rolling time window.
+    Implements the pattern-escalation rule from policy §6 / NIST §3.2.6.
+    """
 
-        if model_confidence >= siem_confidence:
-            return model_confidence, "model+siem"
-        return siem_confidence, "siem"
+    def __init__(self, recheck_after_minutes: int = 10, escalate_if_count: int = 3):
+        self.recheck_after_minutes = recheck_after_minutes
+        self.escalate_if_count = escalate_if_count
+        self._records: dict[str, list[float]] = {}
+
+    def record(self, src_ip: str, count_threshold: Optional[int] = None) -> bool:
+        """
+        Record a SUSPICIOUS hit.  Returns True when the escalation threshold
+        is reached.  `count_threshold` overrides `escalate_if_count` so the
+        RL-adaptive value from PolicyEngine can be applied at call time.
+        """
+        import time
+        now = time.time()
+        window = self.recheck_after_minutes * 60
+        bucket = self._records.setdefault(src_ip, [])
+        self._records[src_ip] = [t for t in bucket if now - t < window]
+        self._records[src_ip].append(now)
+        threshold = count_threshold if count_threshold is not None else self.escalate_if_count
+        return len(self._records[src_ip]) >= threshold
+
+    def clear(self, src_ip: str) -> None:
+        self._records.pop(src_ip, None)
+
+
+class FusionEngine:
+    """
+    Stage 1 — Initial Classification gate (policy §4.1).
+
+    Decision table:
+      model_confidence < trust_floor          → caller treats as BENIGN
+      model_confidence ≥ high_confidence      → ATTACK  (model_only)
+      0.65–(high_conf-1) + siem ≥ siem_min + count ≥ alert_min → ATTACK (model+siem)
+      0.50–0.64 + siem ≥ 0.80 + count ≥ 3   → ATTACK  (siem_override)
+      otherwise                               → SUSPICIOUS (insufficient_evidence)
+
+    When a PolicyEngine is injected, the three RL-adaptive thresholds
+    (model_high_confidence, siem_corroboration_min, siem_alert_count_min)
+    are read from it on every fuse() call so changes propagate immediately.
+    When no policy is provided the hardcoded defaults are used unchanged.
+    """
+
+    def __init__(self, policy=None) -> None:
+        self._policy = policy  # Optional[PolicyEngine] — loose type to avoid import cycle
+
+    def fuse(
+        self,
+        model_confidence: float,
+        siem_confidence: float,
+        siem_alert_count: int,
+    ) -> tuple[float, str, bool]:
+        """
+        Returns (fused_confidence, decision_source, is_suspicious).
+        Called only when the model flags ATTACK and model_confidence >= trust_floor.
+        """
+        # Read adaptive thresholds (or fall back to policy.md defaults)
+        if self._policy is not None:
+            high_conf  = self._policy.model_high_confidence
+            siem_min   = self._policy.siem_corroboration_min
+            alert_min  = self._policy.siem_alert_count_min
+        else:
+            high_conf  = 0.85
+            siem_min   = 0.70
+            alert_min  = 2
+
+        # High-confidence bypass — model alone is sufficient
+        if model_confidence >= high_conf:
+            return model_confidence, "model_only", False
+
+        # Medium band 0.65–(high_conf): needs SIEM corroboration
+        if model_confidence >= 0.65:
+            if siem_confidence >= siem_min and siem_alert_count >= alert_min:
+                return max(model_confidence, siem_confidence), "model+siem", False
+            return model_confidence, "insufficient_evidence", True
+
+        # Low band 0.50–0.64: needs stronger SIEM corroboration (fixed thresholds)
+        if siem_confidence >= 0.80 and siem_alert_count >= 3:
+            return siem_confidence, "siem_override", False
+        return model_confidence, "insufficient_evidence", True
 
 
 class ReasoningEngine:
@@ -492,11 +568,9 @@ class ReasoningEngine:
             f"- Decision source: {decision_source}\n\n"
             "Respond ONLY with a valid JSON object — no markdown, no extra text:\n"
             '{"reasoning": "<2-3 sentence explanation>", "actions": ["<action1>", "<action2>"]}\n\n'
-            "Valid action values: monitor_only, block_immediately, rate_limit, log_for_investigation, "
-            "monitor_closely, enable_syn_flood_protection, increase_connection_limits, block_scanner, "
-            "enable_port_scanning_alerts, enforce_rate_limiting_on_auth, enable_account_lockout, "
-            "enable_waf, sanitize_inputs, block_permanently, threat_intelligence_update, "
-            "isolate_host, enable_full_packet_capture"
+            "Valid action values: monitor_only, block_ip, null_route_ip, rate_limit_ip, "
+            "throttle_connections, quarantine_host, isolate_host, alert_soc, "
+            "log_for_investigation, monitor_closely"
         )
 
     def _parse_llm_output(
@@ -546,8 +620,9 @@ class ReasoningEngine:
         threshold: float,
         decision_source: str,
     ) -> tuple[str, dict[str, Any]]:
+        is_suspicious = decision_source == "insufficient_evidence"
         details: dict[str, Any] = {
-            "decision": "attack" if is_attack else "benign",
+            "decision": "attack" if is_attack else ("suspicious" if is_suspicious else "benign"),
             "confidence_score": round(confidence, 3),
             "decision_source": decision_source,
         }
@@ -609,7 +684,7 @@ class ReasoningEngine:
         decision_source: str,
     ) -> str:
         if is_attack:
-            if decision_source == "model":
+            if decision_source in ("model_only", "model"):
                 return (
                     f"Classified as {attack_type} (confidence: {confidence:.1%}) based on PCA anomaly detection. "
                     f"Anomaly score {anomaly_score:.4f} exceeds threshold {threshold:.4f} by "
@@ -626,8 +701,14 @@ class ReasoningEngine:
                 f"({siem_confidence:.1%} confidence, {siem_alert_count} recent alerts). "
                 "Model had lower confidence, but SIEM history shows this source repeatedly flagged for the same attack type."
             )
+        if decision_source == "insufficient_evidence":
+            return (
+                f"SUSPICIOUS — possible {attack_type} (model confidence: {model_confidence:.1%}, "
+                f"SIEM confidence: {siem_confidence:.1%}, {siem_alert_count} alert(s)). "
+                "Combined signals do not meet thresholds for confirmed attack. Monitoring without firewall action."
+            )
         return (
-            f"Classified as {attack_type} (confidence: {confidence:.1%}). "
+            f"Classified as BENIGN (confidence: {confidence:.1%}). "
             f"Anomaly score {anomaly_score:.4f} is within normal range (threshold: {threshold:.4f}). "
             "Traffic patterns are consistent with benign network activity."
         )
@@ -638,25 +719,31 @@ class ReasoningEngine:
             return ["monitor_only"]
 
         if confidence >= 0.75:
-            actions = ["block_immediately", "log_for_investigation"]
+            actions: list[str] = ["block_ip", "alert_soc"]
         elif confidence >= 0.6:
-            actions = ["rate_limit", "log_for_investigation"]
+            actions = ["rate_limit_ip", "alert_soc"]
         else:
-            actions = ["monitor_closely", "log_for_investigation"]
+            actions = ["log_for_investigation", "alert_soc"]
 
         attack_lower = (attack_type or "").lower().strip()
         if "ddos" in attack_lower or "syn" in attack_lower:
-            actions += ["enable_syn_flood_protection", "increase_connection_limits"]
+            if "null_route_ip" not in actions:
+                actions.append("null_route_ip")
         elif "portscan" in attack_lower or "port scan" in attack_lower:
-            actions += ["block_scanner", "enable_port_scanning_alerts"]
+            if "block_ip" not in actions:
+                actions.insert(0, "block_ip")
         elif "bruteforce" in attack_lower or "brute force" in attack_lower:
-            actions += ["enforce_rate_limiting_on_auth", "enable_account_lockout"]
-        elif "web attack" in attack_lower:
-            actions += ["enable_waf", "sanitize_inputs"]
+            if "throttle_connections" not in actions:
+                actions.append("throttle_connections")
+        elif "web attack" in attack_lower or "webattack" in attack_lower:
+            if "alert_soc" not in actions:
+                actions.append("alert_soc")
         elif "botnet" in attack_lower:
-            actions += ["block_permanently", "threat_intelligence_update"]
+            if "quarantine_host" not in actions:
+                actions.append("quarantine_host")
         elif "infiltration" in attack_lower:
-            actions += ["isolate_host", "enable_full_packet_capture"]
+            if "isolate_host" not in actions:
+                actions.append("isolate_host")
 
         return actions
 
@@ -675,10 +762,11 @@ class DetectionClassificationAgent:
         push_benign_to_kibana: bool = False,
         use_siem_history: bool = True,
         verification_agent: Optional[VerificationAgent] = None,
+        policy=None,   # Optional[PolicyEngine] — injected from main.py when available
     ):
         self.model = PCAIntrusionModel(model_path, threshold_override=model_threshold_override)
         self.kibana = kibana
-        self.fusion = FusionEngine()
+        self.fusion = FusionEngine(policy=policy)   # policy thresholds flow into fuse()
         self.reasoning = ReasoningEngine()
         self.on_attack = on_attack
         self.threshold = float(threshold)
@@ -686,6 +774,8 @@ class DetectionClassificationAgent:
         self.push_benign_to_kibana = push_benign_to_kibana
         self.use_siem_history = use_siem_history
         self.verification_agent = verification_agent
+        self._policy = policy   # kept for process_flow() threshold reads
+        self._suspicious_tracker = SuspiciousStateTracker()
 
     def process_flow(self, flow: FlowRecord) -> ClassificationResult:
         attack_type, anomaly_score = self.model.predict(flow)
@@ -697,25 +787,59 @@ class DetectionClassificationAgent:
             attack_type=attack_type,
         )
 
-        # SIEM fusion — query historical corroboration when enabled.
+        # ── Stage 1: FusionEngine ────────────────────────────────────────────
         siem_conf = 0.0
         siem_count = 0
         fused_conf = model_conf
-        decision_source = "model"
-        is_attack = model_flags_attack
+        decision_source = "model_only"
+        is_attack = False
+        is_suspicious = False
 
-        if self.use_siem_history and model_flags_attack:
-            siem_alerts = self.kibana.get_alerts(
-                flow.src_ip or "unknown", attack_type, self.kibana_window_minutes
+        _trust_floor = self._policy.model_trust_floor if self._policy is not None else 0.50
+
+        if not model_flags_attack:
+            # Model says BENIGN — no further processing
+            pass
+        elif model_conf < _trust_floor:
+            # Below trust floor — discard model output, treat as BENIGN
+            pass
+        else:
+            if self.use_siem_history:
+                siem_alerts = self.kibana.get_alerts(
+                    flow.src_ip or "unknown", attack_type, self.kibana_window_minutes
+                )
+                siem_count = len(siem_alerts)
+                siem_conf = self.kibana.corroboration_score(siem_alerts)
+
+            fused_conf, decision_source, is_suspicious = self.fusion.fuse(
+                model_conf, siem_conf, siem_count
             )
-            siem_count = len(siem_alerts)
-            siem_conf = self.kibana.corroboration_score(siem_alerts)
-            fused_conf, decision_source = self.fusion.fuse(model_conf, siem_conf, siem_count)
+            is_attack = not is_suspicious
+
+        # SUSPICIOUS pattern escalation (policy §6 / NIST §3.2.6)
+        if is_suspicious:
+            src_ip = flow.src_ip or "unknown"
+            _escalate_count = self._policy.suspicious_escalate_count if self._policy is not None else None
+            if self._suspicious_tracker.record(src_ip, count_threshold=_escalate_count):
+                fused_conf, decision_source, is_suspicious = self.fusion.fuse(
+                    model_conf, siem_conf, siem_count + 3
+                )
+                is_attack = not is_suspicious
+                if is_attack:
+                    self._suspicious_tracker.clear(src_ip)
+                    logger.warning(
+                        "[ClassificationAgent] SUSPICIOUS escalated to ATTACK for %s "
+                        "after %d decisions in window",
+                        src_ip, self._suspicious_tracker.escalate_if_count,
+                    )
+
+        # Determine the display attack type for reasoning / result fields
+        display_attack_type = attack_type if (is_attack or is_suspicious) else "BENIGN"
 
         # Generate reasoning
         reasoning_text, reasoning_details = self.reasoning.generate_reasoning(
             is_attack=is_attack,
-            attack_type=attack_type if is_attack else "BENIGN",
+            attack_type=display_attack_type,
             confidence=fused_conf,
             model_confidence=model_conf,
             siem_confidence=siem_conf,
@@ -725,17 +849,17 @@ class DetectionClassificationAgent:
             decision_source=decision_source,
         )
 
-        # Generate recommended actions
         recommended_actions = self.reasoning.recommend_actions(
             is_attack=is_attack,
-            attack_type=attack_type if is_attack else "BENIGN",
+            attack_type=display_attack_type,
             confidence=fused_conf,
         )
 
         result = ClassificationResult(
             flow=flow,
             is_attack=is_attack,
-            attack_type=attack_type if is_attack else "BENIGN",
+            suspicious=is_suspicious,
+            attack_type=display_attack_type,
             confidence=fused_conf,
             model_confidence=model_conf,
             siem_confidence=siem_conf,
@@ -751,21 +875,75 @@ class DetectionClassificationAgent:
             },
         )
 
-        # Verification runs before Kibana push so stored docs include verdict
+        # ── Stage 2: Verification Gate ───────────────────────────────────────
         if result.is_attack and self.verification_agent:
             result = self.verification_agent.verify(result)
 
+        # ── Stage 3: Attack-Type Modifier ────────────────────────────────────
+        if result.is_attack:
+            result = self._apply_attack_type_modifier(result, model_conf)
+
         self._log(result)
+
+        # ── Stage 4: Audit Trail — evidence before mitigation (policy §4.4) ──
         if self.kibana:
-            self.kibana.push_flow(result)
+            self.kibana.push_flow(result)                               # 1. preserve_evidence
             if result.is_attack:
-                self.kibana.push_confirmed_attack(result)
-            if result.is_attack or self.push_benign_to_kibana:
-                self.kibana.push_alert(result)
+                self.kibana.push_confirmed_attack(result)               # 2. confirmed history
+            if result.is_attack or result.suspicious or self.push_benign_to_kibana:
+                self.kibana.push_alert(result)                          # 3. alert index
 
         if result.is_attack and self.on_attack:
-            self.on_attack(result)
+            self.on_attack(result)                                      # 4. mitigate
 
+        return result
+
+    @staticmethod
+    def _apply_attack_type_modifier(
+        result: ClassificationResult,
+        model_confidence: float,
+    ) -> ClassificationResult:
+        """
+        Stage 3 — Attack-type-specific action overrides (policy §4.3).
+        Applied after Stage 2 sets severity, so severity-gated rules are correct.
+        """
+        actions = list(result.recommended_actions)
+        severity = result.severity
+        attack = result.mitigation_attack_type.lower()
+
+        if attack == "ddos":
+            if model_confidence >= 0.85:
+                # Skip rate_limit_ip, go straight to null_route_ip
+                actions = [a for a in actions if a != "rate_limit_ip"]
+                if "null_route_ip" not in actions:
+                    actions.insert(0, "null_route_ip")
+
+        elif attack == "portscan":
+            # Cap permitted actions — port scanning does not warrant isolation
+            allowed = {"block_ip", "alert_soc", "log_for_investigation", "monitor_closely"}
+            actions = [a for a in actions if a in allowed] or ["block_ip"]
+
+        elif attack == "bruteforce":
+            # Always include throttle_connections even at LOW severity
+            if "throttle_connections" not in actions:
+                actions.append("throttle_connections")
+
+        elif attack == "botnet":
+            # Always quarantine at MEDIUM or above — lateral movement risk
+            if severity in ("medium", "high") and "quarantine_host" not in actions:
+                actions.append("quarantine_host")
+
+        elif attack == "infiltration":
+            # Always isolate at MEDIUM or above — internal threat priority
+            if severity in ("medium", "high") and "isolate_host" not in actions:
+                actions.append("isolate_host")
+
+        elif attack in ("web attack", "webattack"):
+            # Always alert SOC — human review required for application-layer impact
+            if "alert_soc" not in actions:
+                actions.append("alert_soc")
+
+        result.recommended_actions = actions
         return result
 
     def run(self, input_config: FlowInputConfig) -> list[ClassificationResult]:
@@ -797,6 +975,16 @@ class DetectionClassificationAgent:
                 verification_line,
                 ", ".join(result.recommended_actions),
             )
+        elif result.suspicious:
+            logger.info(
+                "[ClassificationAgent] SUSPICIOUS type=%s model=%.3f siem=%.3f alerts=%s ip=%s\n  Reasoning: %s",
+                result.attack_type,
+                result.model_confidence,
+                result.siem_confidence,
+                result.siem_alert_count,
+                result.flow.src_ip,
+                result.reasoning,
+            )
         else:
             logger.info(
                 "[ClassificationAgent] BENIGN conf=%.3f ip=%s\n  Reasoning: %s",
@@ -808,12 +996,14 @@ class DetectionClassificationAgent:
     @staticmethod
     def _print_summary(results: list[ClassificationResult]):
         attacks = [r for r in results if r.is_attack]
+        suspicious = [r for r in results if r.suspicious]
         print("\n" + "=" * 55)
         print("  Classification Agent - Summary")
         print("=" * 55)
         print(f"  Total flows   : {len(results)}")
         print(f"  Attacks       : {len(attacks)}")
-        print(f"  Benign        : {len(results) - len(attacks)}")
+        print(f"  Suspicious    : {len(suspicious)}")
+        print(f"  Benign        : {len(results) - len(attacks) - len(suspicious)}")
         if attacks:
             attack_ip_map: dict[str, set[str]] = {}
             for result in attacks:

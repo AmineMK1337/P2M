@@ -16,11 +16,17 @@ try:
 	from src.agents.classification_agent.kibana_adapter import KibanaAdapter, KibanaConfig
 	from src.agents.classification_agent.verification_agent import VerificationAgent
 	from src.agents.mitigation_agent.agent import MitigationAgent
+	from src.core.policy_engine import PolicyEngine
+	from src.learning.rl_policy_optimizer import RLPolicyOptimizer
+	from src.learning.optimizer_scheduler import OptimizerScheduler
 except ModuleNotFoundError:
 	from agents.classification_agent.agent import FlowInputConfig, DetectionClassificationAgent
 	from agents.classification_agent.kibana_adapter import KibanaAdapter, KibanaConfig
 	from agents.classification_agent.verification_agent import VerificationAgent
 	from agents.mitigation_agent.agent import MitigationAgent
+	from core.policy_engine import PolicyEngine
+	from learning.rl_policy_optimizer import RLPolicyOptimizer
+	from learning.optimizer_scheduler import OptimizerScheduler
 
 
 logging.basicConfig(
@@ -97,6 +103,13 @@ def main():
 	kibana = _build_kibana_or_raise(args)
 	print(f"[main] SIEM backend: {kibana.__class__.__name__}")
 
+	# ── RL Threshold Optimizer (background, non-blocking) ────────────────────
+	policy    = PolicyEngine()
+	optimizer = RLPolicyOptimizer(policy=policy, kibana=kibana)
+	scheduler = OptimizerScheduler(optimizer)
+	scheduler.start()
+	print(f"[main] RL policy optimizer started (cycle every {scheduler._interval}s)")
+
 	input_config = FlowInputConfig(
 		mode=args.mode,
 		csv_path=args.csv,
@@ -116,6 +129,7 @@ def main():
 		push_benign_to_kibana=args.kibana_save_all,
 		use_siem_history=bool(args.use_siem_history),
 		verification_agent=verification_agent,
+		policy=policy,   # thresholds now flow from YAML via PolicyEngine
 	)
 
 	agent.run(input_config)

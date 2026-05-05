@@ -60,7 +60,9 @@ def _verdict(score: float) -> str:
         return "Confirmed Historically Consistent Attack"
     if score >= 0.50:
         return "Suspicious Attack with Partial History"
-    return "Newly Observed Attack / Low Historical Evidence"
+    if score >= 0.20:
+        return "Newly Observed Attack / Low Historical Evidence"
+    return "Unknown IP / No History"
 
 
 class VerificationAgent:
@@ -118,25 +120,43 @@ class VerificationAgent:
             "known_attack_types":       history["attack_types"],
         }
 
-        # ---- severity ----
+        # ── Stage 2: severity tier (policy §4.2) ────────────────────────────
         if score > 0.80:
             result.severity = "high"
+            result.decision_source = "verification_confirmed"
         elif score >= 0.50:
             result.severity = "medium"
-        else:
+            result.decision_source = "verification_downgraded"
+        elif score >= 0.20:
             result.severity = "low"
+            result.decision_source = "verification_downgraded"
+        else:
+            result.severity = "info"
+            result.decision_source = "verification_downgraded"
 
-        # ---- gate recommended actions ----
-        if score < 0.50:
-            # No supporting history — observe only, do not block
-            result.recommended_actions = ["monitor_closely", "log_for_investigation"]
-        elif score < 0.80 and "block_immediately" in result.recommended_actions:
-            # Partial evidence — downgrade block to rate-limit
-            result.recommended_actions = [
-                "rate_limit" if a == "block_immediately" else a
-                for a in result.recommended_actions
-            ]
-        # score > 0.80 → keep original actions from ReasoningEngine
+        # ── Stage 2: gate permitted mitigation actions ───────────────────────
+        if score > 0.80:
+            # HIGH — all containment tools permitted; ensure SOC is always notified
+            if "alert_soc" not in result.recommended_actions:
+                result.recommended_actions.append("alert_soc")
+        elif score >= 0.50:
+            # MEDIUM — soft tools only; block_ip is downgraded to rate_limit_ip
+            _medium_allowed = {"rate_limit_ip", "throttle_connections", "alert_soc"}
+            actions = []
+            for a in result.recommended_actions:
+                if a in ("block_ip", "block_immediately"):
+                    actions.append("rate_limit_ip")
+                elif a in _medium_allowed:
+                    actions.append(a)
+            if "alert_soc" not in actions:
+                actions.append("alert_soc")
+            result.recommended_actions = actions
+        elif score >= 0.20:
+            # LOW — log and notify SOC; no firewall rules written
+            result.recommended_actions = ["log_for_investigation", "alert_soc"]
+        else:
+            # INFO — monitor only; no firewall action
+            result.recommended_actions = ["monitor_closely"]
 
         # ---- extend reasoning text ----
         result.reasoning += (

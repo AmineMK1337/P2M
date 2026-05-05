@@ -63,6 +63,9 @@ class ClassificationResult:
     recommended_actions: list[str] = field(default_factory=list)
     reasoning_details: dict[str, Any] = field(default_factory=dict)
 
+    # Intermediate state — insufficient evidence to act (policy §6)
+    suspicious: bool = False
+
     # Verification layer — populated by VerificationAgent
     verification_score: float = 0.0    # 0.0 = not verified / benign
     verification_verdict: str = ""     # empty = not verified
