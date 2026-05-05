@@ -1,0 +1,534 @@
+================================================================================
+  ANDS PIPELINE EXECUTION GUIDE
+  Network Intrusion Detection System - Gateway VM Deployment
+================================================================================
+
+This guide explains how to run the complete ANDS pipeline on the gateway VM,
+from packet capture through detection and mitigation.
+
+================================================================================
+1. PREREQUISITES & ENVIRONMENT SETUP
+================================================================================
+
+Before running the pipeline, ensure:
+
+A. SYSTEM REQUIREMENTS
+   - Gateway VM (Ubuntu/Debian)
+   - Root or sudo privileges for tcpdump and iptables
+   - Network interfaces properly configured:
+     * enp0s8: Connected to attacker VM (Kali)
+     * enp0s9: Connected to victim VM (Ubuntu)
+   
+B. INSTALLED DEPENDENCIES
+   
+   Python 3.8+:
+     sudo apt-get install python3 python3-pip python3-venv
+   
+   tcpdump (packet capture):
+     sudo apt-get install tcpdump
+   
+   Build tools (for Python packages):
+     sudo apt-get install build-essential libssl-dev libffi-dev
+   
+   Network tools (optional, for diagnostics):
+     sudo apt-get install net-tools iproute2
+
+C. REPOSITORY SETUP
+
+   1. Clone or navigate to the ANDS repository:
+      cd /home/gateway/P2M
+   
+   2. Install Python dependencies:
+      pip install -r requirements.txt
+   
+   3. Install CICFlowMeter locally:
+      pip install -e CICflow-meter/
+   
+   4. Verify model exists:
+      ls -lh deployments/models/pca_intrusion_detector.joblib
+      (Should be ~10MB)
+
+D. DIRECTORY STRUCTURE
+
+   The pipeline expects these paths (they will be created if missing):
+   
+   /data/test1/                    # PCAP & CSV storage
+   /logs/                          # Log files
+   
+   Inside the repo:
+   deployments/models/             # ML models
+   src/agents/                      # Classification & mitigation agents
+   scripts/                         # Orchestration scripts
+
+E. VERIFY NETWORK INTERFACES
+
+   Check that interface enp0s8 is available:
+   
+     ip link show
+   
+   Look for enp0s8 in the output. If missing, adjust the interface name
+   in the scripts.
+
+================================================================================
+2. QUICK START: RUN THE PIPELINE
+================================================================================
+
+The pipeline executes in 5-second cycles:
+  1. Capture 5 seconds of traffic on enp0s8
+  2. Extract flow features using CICFlowMeter
+  3. Run ML inference on the features
+  4. Trigger detection & mitigation agents
+  5. Log all alerts to /logs/alerts.log
+
+TO START THE PIPELINE:
+
+  Option A: Run in foreground (see output live)
+  
+    bash scripts/orchestrate_pipeline.sh
+  
+  Option B: Run in background (daemon mode)
+  
+    bash scripts/orchestrate_pipeline.sh > /logs/daemon.log 2>&1 &
+    disown
+  
+  Option C: Run with nohup (survives terminal closure)
+  
+    nohup bash scripts/orchestrate_pipeline.sh > /logs/daemon.log 2>&1 &
+
+EXAMPLE - Run in background:
+
+  $ cd /home/gateway/P2M
+  $ bash scripts/orchestrate_pipeline.sh > /logs/daemon.log 2>&1 &
+  $ disown
+  $ echo $!  # Save PID for later reference
+  12345
+
+TO MONITOR LIVE LOGS:
+
+  Watch the orchestrator log:
+    tail -f /logs/orchestrator.log
+  
+  Watch alerts as they happen:
+    tail -f /logs/alerts.log
+  
+  View both in split terminal:
+    tail -f /logs/orchestrator.log | less  # Terminal 1
+    tail -f /logs/alerts.log | less        # Terminal 2
+
+================================================================================
+3. PIPELINE ARCHITECTURE & EXECUTION FLOW
+================================================================================
+
+Each cycle runs the following stages sequentially (NO overlap):
+
+┌─────────────────────────────────────────────────────────────────┐
+│ CYCLE START (every 5 seconds)                                   │
+└─────────────────────────────────────────────────────────────────┘
+                           ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ STAGE 1: PACKET CAPTURE (5 seconds)                             │
+│ ─────────────────────────────────────                           │
+│ Tool: tcpdump                                                   │
+│ Input: Network interface enp0s8                                 │
+│ Output: /data/test1/simulated_attack.pcap                      │
+│ Command: sudo tcpdump -i enp0s8 -w <output> -G 5 -W 1          │
+│                                                                  │
+│ Result: Binary PCAP file with all traffic during 5s window     │
+└─────────────────────────────────────────────────────────────────┘
+                           ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ STAGE 2: FEATURE EXTRACTION (CICFlowMeter)                      │
+│ ────────────────────────────────────                            │
+│ Tool: CICFlowMeter sniffer                                      │
+│ Input: /data/test1/simulated_attack.pcap                       │
+│ Output: /data/test1/output_<timestamp>.csv (~80 features)      │
+│ Command: python3 -m cicflowmeter.sniffer <input> <output>      │
+│                                                                  │
+│ Result: CSV with one row per flow, features like:              │
+│         - Duration, Packet lengths, Arrival times              │
+│         - TCP/UDP flags, Byte rates, etc.                      │
+└─────────────────────────────────────────────────────────────────┘
+                           ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ STAGE 3: ML INFERENCE (PCA Anomaly Detection)                  │
+│ ───────────────────────────────────────────                    │
+│ Tool: Trained PCA model                                        │
+│ Input: CSV from Stage 2                                        │
+│ Output: /data/test1/output_<timestamp>_results.csv             │
+│         (includes: prediction, anomaly_score, is_attack flags) │
+│                                                                  │
+│ Logic:                                                          │
+│   For each flow:                                               │
+│     1. Scale features                                          │
+│     2. Project to PCA space                                    │
+│     3. Reconstruct from principal components                   │
+│     4. Calculate reconstruction error (anomaly score)          │
+│     5. Classification: error > threshold → ATTACK              │
+│                                                                  │
+│ Result: Anomaly scores and binary attack/benign labels        │
+└─────────────────────────────────────────────────────────────────┘
+                           ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ STAGE 4: DETECTION & MITIGATION AGENTS                          │
+│ ──────────────────────────────────────                          │
+│ Tool: Classification Agent + Mitigation Agent                   │
+│ Input: Results from Stage 3                                     │
+│ Output: /logs/alerts.log                                        │
+│         iptables rules (if DDoS detected)                       │
+│                                                                  │
+│ Logic:                                                          │
+│   For each detected attack:                                     │
+│     1. Log alert with timestamp, source IP, attack type         │
+│     2. Store in historical alert database (Kibana if available) │
+│     3. Trigger mitigation:                                      │
+│        - For DDoS: Block source IP via iptables                 │
+│        - For Port Scan: Log & monitor                           │
+│        - For other types: Log & notify                          │
+│                                                                  │
+│ Result: Alerts logged, IPs blocked on the victim VM            │
+└─────────────────────────────────────────────────────────────────┘
+                           ↓
+              WAIT: (~1-2 seconds)
+              Pad to 5-second cycle boundary
+                           ↓
+                    CYCLE REPEATS
+
+
+TIME BREAKDOWN (5-second cycle):
+  - Packet capture:     ~5 seconds (fixed)
+  - Feature extraction: ~0.5-2 seconds (depends on traffic)
+  - ML inference:       ~0.1-0.5 seconds
+  - Agent execution:    ~0.1-0.3 seconds
+  - Idle/sleep:         ~0-1 seconds
+  ────────────────────────────────
+  TOTAL:                ~5-8 seconds per cycle
+
+================================================================================
+4. OUTPUT & LOG FILES
+================================================================================
+
+The pipeline generates several output files:
+
+A. PCAP FILES
+   Location: /data/test1/
+   Pattern: simulated_attack.pcap (the live, rotating capture file)
+   Contains: All raw network packets from enp0s8 during capture window
+
+B. FEATURE CSV FILES
+   Location: /data/test1/
+   Pattern: output_<timestamp>.csv
+   Columns: ~80 network flow features (packet lengths, durations, flags, etc.)
+   
+   Example:
+     $ head output_1715000000123.csv | cut -d',' -f1-5
+     Flow ID,Source IP,Source Port,Destination IP,Destination Port
+
+C. INFERENCE RESULTS
+   Location: /data/test1/
+   Pattern: output_<timestamp>_results.csv
+   Contains: Original features + [prediction, anomaly_score, is_attack]
+   
+   Columns:
+     - prediction: 1 (benign) or -1 (attack)
+     - anomaly_score: Reconstruction error (higher = more anomalous)
+     - is_attack: Boolean True/False
+
+D. LOG FILES
+   
+   Orchestrator Log:
+     /logs/orchestrator.log
+     Contains: All pipeline execution details, timing, errors
+   
+   Example output:
+     2025-05-05 14:23:45,123 [INFO] [CAPTURE] ✓ Captured 5024 bytes
+     2025-05-05 14:23:47,456 [INFO] [CICFLOWMETER] ✓ Extracted 12 flows
+     2025-05-05 14:23:48,789 [INFO] [ML_INFERENCE] ✓ 2 ATTACKS detected
+     2025-05-05 14:23:49,012 [INFO] [ALERT] Attack: DDoS from 192.168.1.10
+   
+   Alerts Log:
+     /logs/alerts.log
+     Contains: Security alerts triggered by the system
+   
+   Example:
+     2025-05-05 14:23:49,012 [ALERT] Attack: DDoS from 192.168.1.10
+     2025-05-05 14:23:49,345 [ALERT] Blocked IP: 192.168.1.10 (iptables rule added)
+   
+   tcpdump Log:
+     /logs/tcpdump.log (if using legacy mode)
+
+TO ANALYZE DETECTIONS:
+
+  Count total flows processed:
+    find /data/test1/output_*.csv -exec wc -l {} + | tail -1
+  
+  Count attacks detected:
+    find /data/test1/output_*_results.csv -exec grep ",1$" {} + | wc -l
+  
+  View all alerts:
+    cat /logs/alerts.log
+  
+  View recent alerts (last 20):
+    tail -20 /logs/alerts.log
+  
+  View attacks by type:
+    grep -i "attack:" /logs/alerts.log | sort | uniq -c
+
+================================================================================
+5. STOPPING THE PIPELINE
+================================================================================
+
+TO STOP A RUNNING PIPELINE:
+
+  Option A: Kill the foreground process
+    Press Ctrl+C in the terminal
+  
+  Option B: Kill the background daemon
+    # Find the process
+    ps aux | grep orchestrate_pipeline
+    
+    # Kill by PID
+    kill <PID>
+    
+    # Or use the stop script
+    bash scripts/stop_pipeline.sh
+  
+  Option C: Force kill (if normal kill doesn't work)
+    pkill -9 -f orchestrate_pipeline
+
+VERIFY PIPELINE IS STOPPED:
+
+  ps aux | grep orchestrate_pipeline
+  # Should show no matching processes (only the grep itself)
+  
+  Check for orphaned tcpdump:
+    ps aux | grep tcpdump
+    # If still running, kill it:
+    sudo pkill -f tcpdump
+
+================================================================================
+6. TROUBLESHOOTING
+================================================================================
+
+A. ERROR: "Interface enp0s8 not found"
+   
+   Cause: Network interface name differs or doesn't exist
+   Solution:
+     1. List available interfaces: ip link show
+     2. Update INTERFACE in scripts/orchestrate_pipeline.py (line ~30)
+     3. Restart pipeline
+
+B. ERROR: "Model not found at deployments/models/pca_intrusion_detector.joblib"
+   
+   Cause: Model file missing or in wrong location
+   Solution:
+     1. Verify file exists: ls -lh deployments/models/
+     2. Train model if needed: see ML model.md
+     3. Ensure model is in exact path expected
+
+C. ERROR: "sudo: tcpdump: command not found"
+   
+   Cause: tcpdump not installed
+   Solution:
+     sudo apt-get install tcpdump
+
+D. PIPELINE RUNS SLOWLY (cycles > 10 seconds)
+   
+   Cause: Heavy traffic or slow disk
+   Solution:
+     1. Check disk space: df -h /data/test1
+     2. Monitor CPU: top (look for python3, tcpdump)
+     3. Reduce verbose logging: redirect logs to /dev/null
+
+E. NO ALERTS GENERATED (even with active attack traffic)
+   
+   Cause: Threshold too high, model not working, or no traffic captured
+   Solution:
+     1. Verify traffic is being captured:
+        tcpdump -i enp0s8 -G 5 -w /tmp/test.pcap
+     2. Check PCAP file size: ls -lh /data/test1/simulated_attack.pcap
+     3. Test model manually: python3 run_predictions.py
+     4. Lower threshold in orchestrate_pipeline.py if needed
+
+F. PERMISSION DENIED when writing to /data/test1 or /logs
+   
+   Cause: Directory ownership or permissions
+   Solution:
+     sudo mkdir -p /data/test1 /logs
+     sudo chown -R $(whoami):$(whoami) /data/test1 /logs
+     sudo chmod 755 /data/test1 /logs
+
+G. PYTHON IMPORT ERRORS (ModuleNotFoundError)
+   
+   Cause: Dependencies not installed or PYTHONPATH wrong
+   Solution:
+     1. Install dependencies: pip install -r requirements.txt
+     2. Install CICFlowMeter: pip install -e CICflow-meter/
+     3. Verify import: python3 -c "import cicflowmeter; print(cicflowmeter.__file__)"
+
+================================================================================
+7. PERFORMANCE TUNING
+================================================================================
+
+A. REDUCE CYCLE TIME (capture < 5 seconds)
+   
+   Edit scripts/orchestrate_pipeline.py:
+     CAPTURE_DURATION = 3  # Reduce from 5 to 3 seconds
+     CYCLE_INTERVAL = 3
+   
+   Note: Shorter cycles = fewer flows per batch, but more frequent updates
+
+B. INCREASE BATCH SIZE (capture > 5 seconds)
+   
+   Edit scripts/orchestrate_pipeline.py:
+     CAPTURE_DURATION = 10
+     CYCLE_INTERVAL = 10
+   
+   Note: Longer cycles = more flows, better model accuracy, but higher latency
+
+C. ADJUST DETECTION THRESHOLD
+   
+   Lower threshold = more detections (higher sensitivity):
+     Edit orchestrate_pipeline.py: DETECTION_THRESHOLD = 0.3
+   
+   Higher threshold = fewer false positives (less sensitive):
+     Edit orchestrate_pipeline.py: DETECTION_THRESHOLD = 0.7
+   
+   Recommended: 0.5 (default)
+
+D. DISABLE SIEM INTEGRATION (for faster execution without Elasticsearch)
+   
+   The pipeline automatically falls back to local detection if Kibana is unavailable.
+   No configuration needed.
+
+================================================================================
+8. MONITORING TIPS
+================================================================================
+
+A. WATCH PIPELINE IN REAL-TIME
+   
+   Terminal 1 - Orchestrator log:
+     tail -f /logs/orchestrator.log
+   
+   Terminal 2 - Alerts:
+     tail -f /logs/alerts.log
+   
+   Terminal 3 - Live tcpdump:
+     sudo tcpdump -i enp0s8 -nn
+
+B. TRACK STATISTICS
+   
+   Count cycles executed:
+     grep "CYCLE" /logs/orchestrator.log | wc -l
+   
+   Count flows extracted per cycle:
+     grep "Extracted.*flows" /logs/orchestrator.log | tail -5
+   
+   Count attacks detected:
+     grep "\[ALERT\] Attack:" /logs/alerts.log | wc -l
+   
+   List unique source IPs in attacks:
+     grep "Attack.*from" /logs/alerts.log | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | sort | uniq -c
+
+C. CHECK SYSTEM HEALTH
+   
+   Disk usage:
+     du -sh /data/test1 /logs
+   
+   Memory usage by Python:
+     ps aux | grep python3 | grep orchestrate
+   
+   Network traffic (on attacker side):
+     sudo iftop -i eth0  # or your attacker interface
+
+================================================================================
+9. EXAMPLE WORKFLOW
+================================================================================
+
+SCENARIO: Start pipeline, generate attack traffic, observe detections
+
+Step 1: Start pipeline in background
+  $ cd /home/gateway/P2M
+  $ bash scripts/orchestrate_pipeline.sh > /logs/daemon.log 2>&1 &
+  $ disown
+  $ echo "Pipeline started"
+
+Step 2: Open monitoring terminal
+  $ tail -f /logs/orchestrator.log
+  
+  Output:
+    [+] Starting ANDS Pipeline Orchestrator...
+    ✓ Environment ready
+    ╔════════════════════════════════════════════════════════════════╗
+    ║          ANDS PIPELINE ORCHESTRATOR - STARTING                ║
+    ╚════════════════════════════════════════════════════════════════╝
+    
+    ======================================================================
+    CYCLE 1 [14:23:45]
+    ======================================================================
+    [CAPTURE] ✓ Captured /data/test1/simulated_attack.pcap
+    [CICFLOWMETER] ✓ Extracted 8 flows
+    [ML_INFERENCE] ✓ All 8 flows benign
+    [PIPELINE] Cycle complete. Sleeping 2.3s until next cycle...
+
+Step 3: Generate attack traffic from attacker VM
+  $ hping3 -S --flood -p 80 <victim-ip>  # Port scan attack
+  OR
+  $ slowloris <victim-ip>                  # Slow DDoS attack
+
+Step 4: Observe detections in logs
+  $ tail -f /logs/alerts.log
+  
+  Output:
+    2025-05-05 14:24:12,456 [INFO] [ALERT] Attack: DDoS from 192.168.1.100
+    2025-05-05 14:24:12,789 [INFO] [ALERT] Blocked IP: 192.168.1.100
+
+Step 5: Verify mitigation (IP blocked)
+  $ sudo iptables -L -n | grep 192.168.1.100
+  
+  Output:
+    DROP  all  --  192.168.1.100  anywhere
+
+Step 6: Stop pipeline when done
+  $ bash scripts/stop_pipeline.sh
+  
+  Output:
+    [+] Stopping ANDS pipeline components...
+    [✓] Pipeline stopped
+
+================================================================================
+10. NEXT STEPS & OPTIMIZATION
+================================================================================
+
+A. INTEGRATE WITH FRONTEND DASHBOARD
+   Start API server to feed data to React frontend:
+     python3 -m uvicorn src.api:app --host 0.0.0.0 --port 8000
+
+B. CONNECT TO ELASTICSEARCH/KIBANA
+   Set environment variables before running pipeline:
+     export KIBANA_HOST="http://localhost:9200"
+     export KIBANA_INDEX="ands-alerts"
+     bash scripts/orchestrate_pipeline.sh
+
+C. FINE-TUNE PCA MODEL
+   Re-train on custom traffic for better accuracy:
+     python3 notebooks/model.ipynb
+
+D. ADD CUSTOM ATTACK DETECTION RULES
+   Modify src/agents/classification_agent/agent.py:
+     - Add threshold customization per attack type
+     - Add rule-based detection alongside ML
+
+E. DEPLOY TO PRODUCTION
+   See: docs/deployment.md
+
+================================================================================
+END OF GUIDE
+================================================================================
+
+For questions or issues:
+  - Check /logs/orchestrator.log for detailed execution trace
+  - Review src/agents/ for agent logic
+  - See ML model.md for model details
+  - Check README.md for system overview
+
+Last updated: 2025-05-05
