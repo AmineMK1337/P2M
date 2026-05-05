@@ -86,7 +86,7 @@ $$ Q_{new}(s_t, a_t) = Q(s_t, a_t) + \alpha \cdot \Big[R_{t+1} + \gamma \cdot \m
     ```
     - **The Key (The State)** e.g., `"(0, 0, 0, 2, 1)"`: Represents the discretized metrics snapshot. The metrics are binned into levels (0=Low, 1=Medium, 2=High) mapping to `(SuspiciousRate, FPRate, FNRate, AvgModelConfidence, AvgSIEMConfidence)`. In this example: Low errors, High model confidence, Medium SIEM confidence.
     - **The Inner Keys (The Actions)** `"0"` through `"8"`: Represent the 9 possible actions the agent can take (e.g., `"0"` increases `model_high_confidence`, `"8"` means do nothing).
-    `
+    
             if action == 0:
                     thresholds["model_high_confidence"] += 0.01
                 elif action == 1:
@@ -104,5 +104,5 @@ $$ Q_{new}(s_t, a_t) = Q(s_t, a_t) + \alpha \cdot \Big[R_{t+1} + \gamma \cdot \m
                 elif action == 7:
                     thresholds["suspicious_escalate_count"] -= 1
                 # action == 8: no change
-`
+
     - **The Values (The Q-Values)** e.g., `0.0`: The learned expected reward for taking that action in that state. As the system runs and evaluates the choices, these floats will rise for good actions and drop to negative numbers for bad ones, guiding the agent's future choices.
