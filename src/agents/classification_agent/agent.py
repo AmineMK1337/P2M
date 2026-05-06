@@ -452,22 +452,25 @@ class ReasoningEngine:
     ZYSEC_MODEL = "hf.co/ZySec-AI/ZySec-7B-GGUF:latest"
     OLLAMA_BASE_URL = "http://localhost:11434"
 
-    def __init__(self, model: str = ZYSEC_MODEL, ollama_base_url: str = OLLAMA_BASE_URL):
-        self.model = model
-        self.ollama_base_url = ollama_base_url
+    def __init__(self):
         self._cached_actions: list[str] = []
         self._llm = self._init_llm()
 
     def _init_llm(self) -> Any:
         try:
-            from langchain_ollama import OllamaLLM
-            llm = OllamaLLM(
-                model=self.model,
-                base_url=self.ollama_base_url,
-                temperature=0.1,
-                num_predict=512,
+            try:
+                from src.llms.llm_client import build_llm_client
+            except ModuleNotFoundError:
+                from llms.llm_client import build_llm_client
+            llm = build_llm_client(
+                provider="ollama",
+                model=self.ZYSEC_MODEL,
+                ollama_base_url=self.OLLAMA_BASE_URL,
             )
-            logger.info("[ReasoningEngine] ZySec LLM ready (model=%s)", self.model)
+            if llm is None:
+                logger.warning("[ReasoningEngine] ZySec client returned None, will use fallback reasoning.")
+            else:
+                logger.info("[ReasoningEngine] ZySec LLM ready (model=%s)", self.ZYSEC_MODEL)
             return llm
         except Exception as exc:
             logger.warning("[ReasoningEngine] Could not initialize ZySec LLM, will use fallback: %s", exc)
@@ -573,6 +576,13 @@ class ReasoningEngine:
             "log_for_investigation, monitor_closely"
         )
 
+    @staticmethod
+    def _trim_prose(text: str, max_sentences: int = 3) -> str:
+        """Return the first N sentences of a prose string."""
+        import re
+        sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+        return " ".join(sentences[:max_sentences]).strip()
+
     def _parse_llm_output(
         self,
         output: str,
@@ -587,6 +597,7 @@ class ReasoningEngine:
         decision_source: str,
     ) -> tuple[str, list[str]]:
         if output:
+            # Try structured JSON first
             start = output.find("{")
             end = output.rfind("}")
             if start != -1 and end != -1:
@@ -599,6 +610,11 @@ class ReasoningEngine:
                         return reasoning, actions or self._fallback_actions(is_attack, attack_type, confidence)
                 except (json.JSONDecodeError, ValueError):
                     pass
+
+            # ZySec returns prose — use it directly instead of discarding it
+            prose = self._trim_prose(output)
+            if prose:
+                return prose, self._fallback_actions(is_attack, attack_type, confidence)
 
         return (
             self._fallback_reasoning(

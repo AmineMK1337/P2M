@@ -145,6 +145,12 @@ class RLPolicyOptimizer:
         self._prev_state: Optional[str] = None
         self._prev_action: Optional[int] = None
 
+        # Cycle telemetry — readable by the API for dashboard display
+        self.last_action_name: str = "—"
+        self.last_reward: float = 0.0
+        self.last_run_at: Optional[str] = None
+        self.cycle_count: int = 0
+
     # ── Public entry point ────────────────────────────────────────────────────
 
     def run_cycle(self) -> None:
@@ -180,6 +186,7 @@ class RLPolicyOptimizer:
             state = self._state_key(metrics)
 
             # 3. Update Q-table for previous (state, action) pair using current reward
+            reward = 0.0
             if self._prev_state is not None and self._prev_action is not None:
                 reward = self._compute_reward(metrics)
                 logger.info("[RL-OPTIMIZER] Reward obtained: %.4f", reward)
@@ -202,6 +209,12 @@ class RLPolicyOptimizer:
             _save_qtable(self._qtable)
             self._prev_state = state
             self._prev_action = action
+
+            # 8. Update telemetry for dashboard
+            self.last_action_name = action_name
+            self.last_reward = round(reward, 4)
+            self.last_run_at = datetime.now(timezone.utc).isoformat()
+            self.cycle_count += 1
 
     # ── Metrics ───────────────────────────────────────────────────────────────
 
@@ -371,8 +384,7 @@ class RLPolicyOptimizer:
 
     def _compute_reward(self, metrics: dict[str, float]) -> float:
         """
-        reward = 5·TP − 8·FP − 10·FN − 4·wrong_mitigation
-                 + 3·mitigation_success − 2·analyst_override
+        reward = 5·TP − 8·FP − 10·FN − 4·wrong_mitigation + 3·mitigation_success − 2·analyst_override
         """
         return (
             5.0  * metrics["tp_count"]
@@ -405,7 +417,7 @@ class RLPolicyOptimizer:
         q_next = self._q_values(next_state)
         best_next = max(q_next.values())
         old = q_prev[prev_action]
-        q_prev[prev_action] = old + _ALPHA * (reward + _GAMMA * best_next - old)
+        q_prev[prev_action] = old + _ALPHA * (reward + _GAMMA * best_next - old) #Q-Learning Equation
 
     # ── Action application ────────────────────────────────────────────────────
 
