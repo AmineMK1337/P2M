@@ -123,6 +123,16 @@ function normalize(dashboard, system, logs) {
       actions: asArray(defense.actions || [])
     },
     mitigation: dashboard.mitigation || {},
+    rl: {
+      model_high_confidence: toNumber((dashboard.rl || {}).model_high_confidence, 0.85),
+      model_trust_floor: toNumber((dashboard.rl || {}).model_trust_floor, 0.50),
+      siem_corroboration_min: toNumber((dashboard.rl || {}).siem_corroboration_min, 0.70),
+      suspicious_escalate_count: toNumber((dashboard.rl || {}).suspicious_escalate_count, 3),
+      last_action: String((dashboard.rl || {}).last_action || "—"),
+      last_reward: toNumber((dashboard.rl || {}).last_reward, 0),
+      last_run_at: (dashboard.rl || {}).last_run_at || null,
+      cycle_count: toNumber((dashboard.rl || {}).cycle_count, 0),
+    },
     systemMetrics: {
       cpu: system.cpu || 0,
       ram: system.ram || 0,

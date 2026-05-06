@@ -16,12 +16,18 @@ try:
     from src.agents.classification_agent.verification_agent import VerificationAgent
     from src.agents.mitigation_agent.agent import MitigationAgent
     from src.shared.schemas import ClassificationResult
+    from src.core.policy_engine import PolicyEngine
+    from src.learning.rl_policy_optimizer import RLPolicyOptimizer
+    from src.learning.optimizer_scheduler import OptimizerScheduler
 except ModuleNotFoundError:
     from agents.classification_agent.agent import FlowInputConfig, DetectionClassificationAgent, get_flow_stream
     from agents.classification_agent.kibana_adapter import KibanaAdapter, KibanaConfig
     from agents.classification_agent.verification_agent import VerificationAgent
     from agents.mitigation_agent.agent import MitigationAgent
     from shared.schemas import ClassificationResult
+    from core.policy_engine import PolicyEngine
+    from learning.rl_policy_optimizer import RLPolicyOptimizer
+    from learning.optimizer_scheduler import OptimizerScheduler
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("api_server")
@@ -55,11 +61,23 @@ global_state: Dict[str, Any] = {
         "actions_taken": [],
         "mitigated": False
     },
+    "rl": {
+        "model_high_confidence": 0.85,
+        "model_trust_floor": 0.50,
+        "siem_corroboration_min": 0.70,
+        "suspicious_escalate_count": 3,
+        "last_action": "—",
+        "last_reward": 0.0,
+        "last_run_at": None,
+        "cycle_count": 0,
+    },
     "logs": ["[API] System booted. Initializing Classification Agent..."]
 }
 
 flow_count = 0
 blocked_ips = set()
+rl_optimizer: "RLPolicyOptimizer | None" = None
+rl_policy: "PolicyEngine | None" = None
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -158,13 +176,34 @@ def update_global_state(result: ClassificationResult):
         "mitigated": result.mitigated
     }
 
+def _sync_rl_state():
+    """Copy live RL/policy values into global_state so the API reflects them."""
+    if rl_policy is None:
+        return
+    snap = rl_policy.snapshot()
+    global_state["rl"].update({
+        "model_high_confidence": round(snap["model_high_confidence"], 4),
+        "model_trust_floor": round(snap["model_trust_floor"], 4),
+        "siem_corroboration_min": round(snap["siem_corroboration_min"], 4),
+        "suspicious_escalate_count": snap["suspicious_escalate_count"],
+    })
+    if rl_optimizer is not None:
+        global_state["rl"].update({
+            "last_action": rl_optimizer.last_action_name,
+            "last_reward": rl_optimizer.last_reward,
+            "last_run_at": rl_optimizer.last_run_at,
+            "cycle_count": rl_optimizer.cycle_count,
+        })
+
+
 async def agent_loop(kibana):
     """
     Background worker that indefinitely streams data into the ClassificationAgent.
     This replaces the previous 'main.py' CLI loop when running via the API.
     """
+    global rl_optimizer, rl_policy
     logger.info("Initializing background agent loop...")
-    
+
     mitigation_agent = MitigationAgent()
 
     use_siem_history = _env_bool("USE_SIEM_HISTORY", default=True)
@@ -174,8 +213,16 @@ async def agent_loop(kibana):
     global_state["logs"].append(
         f"[API] SIEM backend active: {kibana.__class__.__name__} (history_fusion={'on' if use_siem_history else 'off'})"
     )
-    
+
     verification_agent = VerificationAgent(kibana) if kibana else None
+
+    # Wire up the RL policy optimizer
+    rl_policy = PolicyEngine()
+    rl_optimizer = RLPolicyOptimizer(policy=rl_policy, kibana=kibana)
+    rl_scheduler = OptimizerScheduler(rl_optimizer)
+    rl_scheduler.start()
+    _sync_rl_state()
+    global_state["logs"].append("[RL] Policy optimizer started — thresholds updating every 10 min.")
 
     agent = DetectionClassificationAgent(
         model_path="deployments/models/pca_intrusion_detector.joblib",
@@ -186,6 +233,7 @@ async def agent_loop(kibana):
         kibana_window_minutes=siem_window,
         use_siem_history=use_siem_history,
         verification_agent=verification_agent,
+        policy=rl_policy,
     )
     
     # 1. Determine the active capture mode
@@ -219,6 +267,7 @@ async def agent_loop(kibana):
                 
                 # Update Dashboard State
                 update_global_state(result)
+                _sync_rl_state()
                 
                 # Sleep between individual CSV flows to simulate realtime
                 if not is_live:
@@ -251,7 +300,8 @@ async def get_dashboard():
         "detection": global_state.get("detection", {}),
         "decision": global_state.get("decision", {}),
         "defense": global_state.get("defense", {}),
-        "mitigation": global_state.get("mitigation", {})
+        "mitigation": global_state.get("mitigation", {}),
+        "rl": global_state.get("rl", {}),
     }
 
 @app.get("/api/system")

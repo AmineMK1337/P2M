@@ -58,104 +58,75 @@ Download them from Kaggle and place the extracted CSVs under `data/raw/`:
 - Network Traffic Datasets (CIC-IDS2017, CSE-CIC-IDS2018)
 - Firewall or Router APIs
 
-## Quick Start (Setup + Run)
+## Quick Start (Full Stack Setup & Run)
 
-### 1) Create and activate a virtual environment
+This section guides you through running the entire ANDS platform, including the Elasticsearch memory, the FastAPI backend, and the React frontend dashboard.
+
+### 1) Environment Configuration (`.env`)
+
+Create a `.env` file in the root directory. This configures the backend, the Large Language Model provider, and the connection to the SIEM (Elasticsearch). Your `.env` should look like this:
+
+```env
+# LLM Provider Configuration
+LLM_PROVIDER=anthropic          # Options: anthropic | openai | ollama
+LLM_MODEL=claude-3-opus-20240229
+ANTHROPIC_API_KEY=your_api_key_here
+
+# SIEM Backend (Elasticsearch/Kibana)
+USE_SIEM_HISTORY="True"         # Must be True to enable historical memory
+KIBANA_HOST=http://localhost:9200
+KIBANA_INDEX=ands-alerts
+KIBANA_VERIFY_CERTS=0
+
+# Mitigation Auto-Pilot
+AUTO_MITIGATE="False"           # Set to True for automatic containment via iptables
+```
+
+### 2) Start Elasticsearch & Kibana (Docker)
+
+The backend requires Elasticsearch to maintain its historical cyberattack memory. You must start the Docker containers **before** running the backend.
 
 ```powershell
+# From the project root, start the containers in detached mode:
+docker compose up -d
+
+# Check if they are healthy:
+docker compose ps
+curl http://localhost:9200/
+```
+Wait a few seconds for the `curl` command to return the Elasticsearch cluster information, confirming it's ready.
+
+### 3) Start the FastAPI Backend
+
+With Elasticsearch running, activate your Python virtual environment, install dependencies, and launch the backend controller.
+
+```powershell
+# Create and activate environment
 python -m venv .venv
 & ".\.venv\Scripts\Activate.ps1"
-```
 
-### 2) Install dependencies
-
-```powershell
+# Install backend dependencies
 & ".\.venv\Scripts\python.exe" -m pip install -r requirements.txt
-```
 
-### 3) Configure environment variables
-
-Create a `.env` file if you need custom settings:
-
-```powershell
-Copy-Item .env.example .env
-```
-
-If you are not running Elasticsearch/Kibana yet, disable SIEM fusion while you test the backend:
-
-```powershell
-$env:USE_SIEM_HISTORY = "false"
-```
-
-If Elasticsearch is running, keep SIEM enabled and point the app to your cluster:
-
-```powershell
-$env:KIBANA_HOST = "http://localhost:9200"
-$env:KIBANA_INDEX = "ands-alerts"
-```
-
-### 4) Run the backend API
-
-This starts the FastAPI backend used by the dashboard and API tests:
-
-```powershell
+# Launch the FastAPI server
 & ".\.venv\Scripts\python.exe" -m uvicorn src.api:app --reload --port 8000
 ```
+*Note: If the backend throws a `ConnectionRefusedError: [WinError 10061]`, it means your Docker Elasticsearch container is not running or not healthy yet.*
 
-If Elasticsearch/Kibana is not available, start it with SIEM disabled:
+### 4) Start the Application Frontend (React/Vite)
 
-```powershell
-$env:USE_SIEM_HISTORY = "false"
-& ".\.venv\Scripts\python.exe" -m uvicorn src.api:app --reload --port 8000
-```
-
-### 5) Verify the backend
-
-With the backend running, run the API test script in a second terminal:
+In a **new terminal tab**, navigate into the frontend folder to serve the real-time monitoring dashboard.
 
 ```powershell
-& ".\.venv\Scripts\python.exe" scripts/test_backend.py
+cd frontend
+npm install
+npm run dev
 ```
+Open the URL provided by Vite (typically `http://localhost:5173`) in your browser to view the ANDS dashboard.
 
-You can also open these endpoints directly in a browser or with `Invoke-WebRequest`:
+---
 
-- `http://127.0.0.1:8000/api/agents/status`
-- `http://127.0.0.1:8000/api/system`
-- `http://127.0.0.1:8000/api/dashboard`
-
-### 6) Run the CLI classification pipeline
-
-This reads the sample CSV flow file and prints predictions to the terminal:
-
-```powershell
-& ".\.venv\Scripts\python.exe" -m src.main --mode csv --csv data/test/test.csv
-```
-
-If Elasticsearch/Kibana is available, you can connect explicitly:
-
-```powershell
-& ".\.venv\Scripts\python.exe" -m src.main --kibana-host http://localhost:9200 --kibana-index ands-alerts --mode csv --csv data/test/test.csv
-```
-
-### 7) Run the MCP server
-
-The MCP threat-intelligence server is separate from the backend API:
-
-```powershell
-& ".\.venv\Scripts\python.exe" -m src.agents.classification_agent.mcp_server
-```
-
-To expose it over HTTP/SSE instead of stdio:
-
-```powershell
-& ".\.venv\Scripts\python.exe" -m src.agents.classification_agent.mcp_server --transport sse --port 9000
-```
-
-### 8) Run tests
-
-```powershell
-& ".\.venv\Scripts\python.exe" -m pytest tests/test_intrusion_classification_agent.py -v
-```
+## Alternative/Standalone CLI Modes
 
 ## Challenges
 - Requirement for large and high-quality network datasets

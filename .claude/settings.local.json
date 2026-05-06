@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(try { $r = Invoke-WebRequest -Uri \"http://localhost:5173\" -TimeoutSec 5 -UseBasicParsing; \"Frontend UP: $\\($r.StatusCode\\), Content-Type: $\\($r.Headers['Content-Type']\\)\" } catch { \"Frontend check failed: $\\($_.Exception.Message\\)\" })"
+    ]
+  }
+}
