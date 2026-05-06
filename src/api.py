@@ -9,6 +9,7 @@ load_dotenv()
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 try:
     from src.agents.classification_agent.agent import FlowInputConfig, DetectionClassificationAgent, get_flow_stream
@@ -78,6 +79,74 @@ flow_count = 0
 blocked_ips = set()
 rl_optimizer: "RLPolicyOptimizer | None" = None
 rl_policy: "PolicyEngine | None" = None
+
+
+class PipelineRunSummary(BaseModel):
+    status: str = "completed"
+    source: str = "test_full_pipeline"
+    total_flows: int = 0
+    attack_count: int = 0
+    benign_count: int = 0
+    execution_seconds: float = 0.0
+    prediction: str = "normal"
+    confidence: float = 0.0
+    model_confidence: float = 0.0
+    siem_confidence: float = 0.0
+    attack_type: str = "BENIGN"
+    reasoning: str = ""
+    decision_action: str = "allow"
+    blocked_ips: List[str] = Field(default_factory=list)
+    last_blocked_ip: str = "none"
+
+
+def apply_pipeline_run_summary(summary: PipelineRunSummary) -> None:
+    global global_state
+
+    blocked_list = [ip for ip in summary.blocked_ips if ip]
+    last_blocked_ip = summary.last_blocked_ip or (blocked_list[-1] if blocked_list else "none")
+
+    global_state["capture"] = {
+        "pcaps": 1,
+        "status": summary.status,
+        "source": summary.source,
+    }
+    global_state["features"] = {
+        "flows": int(summary.total_flows),
+        "items": [],
+    }
+    global_state["detection"] = {
+        "prediction": summary.prediction,
+        "confidence": float(summary.confidence),
+        "model_confidence": float(summary.model_confidence),
+        "siem_confidence": float(summary.siem_confidence),
+        "attack_type": summary.attack_type,
+        "reasoning": summary.reasoning,
+        "verification_score": 0.0,
+        "verification_verdict": "",
+    }
+    global_state["decision"] = {
+        "action": summary.decision_action,
+        "source": "test_pipeline",
+        "confidence": float(summary.confidence),
+    }
+    global_state["defense"] = {
+        "blocked_ips": blocked_list,
+        "total": len(blocked_list),
+        "last_blocked_ip": last_blocked_ip,
+    }
+    global_state["mitigation"] = {
+        "status": summary.status,
+        "actions_taken": ["summary_published"] if summary.total_flows else [],
+        "mitigated": bool(blocked_list),
+    }
+
+    global_state["logs"].append(
+        f"[TEST MODE] {summary.status.upper()} | flows={summary.total_flows} | "
+        f"attacks={summary.attack_count} | benign={summary.benign_count} | "
+        f"confidence={summary.confidence:.3f} | last_ip={last_blocked_ip}"
+    )
+    if len(global_state["logs"]) > 20:
+        global_state["logs"] = global_state["logs"][-20:]
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -176,6 +245,19 @@ def update_global_state(result: ClassificationResult):
         "mitigated": result.mitigated
     }
 
+<<<<<<< HEAD
+
+@app.post("/api/pipeline/test-run")
+async def post_test_pipeline_run(summary: PipelineRunSummary):
+    apply_pipeline_run_summary(summary)
+    return {
+        "ok": True,
+        "capture": global_state.get("capture", {}),
+        "detection": global_state.get("detection", {}),
+        "decision": global_state.get("decision", {}),
+        "defense": global_state.get("defense", {}),
+    }
+=======
 def _sync_rl_state():
     """Copy live RL/policy values into global_state so the API reflects them."""
     if rl_policy is None:
@@ -195,6 +277,7 @@ def _sync_rl_state():
             "cycle_count": rl_optimizer.cycle_count,
         })
 
+>>>>>>> 610fdcfcf430a56e5072f54d860b7338a291679c
 
 async def agent_loop(kibana):
     """
