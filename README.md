@@ -13,18 +13,16 @@
 4. [Datasets](#4-datasets)
 5. [Component Deep-Dives](#5-component-deep-dives)
    - 5.1 [Classification Agent](#51-classification-agent)
-   - 5.2 [Verification Agent](#52-verification-agent)
-   - 5.3 [Mitigation Agent](#53-mitigation-agent)
-   - 5.4 [RL Policy Optimizer](#54-rl-policy-optimizer)
-   - 5.5 [Policy Engine](#55-policy-engine)
-   - 5.6 [LLM Reasoning Engine (ZySec)](#56-llm-reasoning-engine-zysec)
-   - 5.7 [Elasticsearch / Kibana Integration](#57-elasticsearch--kibana-integration)
-   - 5.8 [FastAPI Backend & React Dashboard](#58-fastapi-backend--react-dashboard)
+     - 5.1.1 [ML Model Pipeline](#511-ml-model-pipeline)
+     - 5.1.2 [Elasticsearch / Kibana (SIEM Memory)](#512-elasticsearch--kibana-siem-memory)
+     - 5.1.3 [Threshold Optimizer (Q-Learning)](#513-threshold-optimizer-q-learning)
+   - 5.2 [Mitigation Agent](#52-mitigation-agent)
+   - 5.3 [FastAPI Backend & React Dashboard](#53-fastapi-backend--react-dashboard)
 6. [Model Evaluation & Metrics](#6-model-evaluation--metrics)
    - 6.1 [PCA Anomaly Detector (Deployed Model)](#61-pca-anomaly-detector-deployed-model)
    - 6.2 [Supervised Classifiers (Comparison Study)](#62-supervised-classifiers-comparison-study)
    - 6.3 [Evaluation Script](#63-evaluation-script)
-7. [Decision Pipeline — 4 Stages](#7-decision-pipeline--4-stages)
+7. [Decision Pipeline — 3 Stages](#7-decision-pipeline--3-stages)
 8. [Technologies Stack](#8-technologies-stack)
 9. [Project Status](#9-project-status)
 10. [Quick Start (Full Stack)](#10-quick-start-full-stack)
@@ -38,7 +36,7 @@
 
 The **Adaptive Network Defense System (ANDS)** is an AI-powered cybersecurity platform that automatically detects, classifies, and mitigates cyberattacks in real time. It replaces traditional static, signature-based defenses with dynamic behavioral analysis, multi-signal decision fusion, and an autonomous reinforcement-learning feedback loop that continuously adapts its own detection thresholds.
 
-ANDS implements a **Multi-Agent System (MAS)** in which specialized agents cooperate along a strict pipeline:
+ANDS implements a **two-agent system** where the Classification Agent handles the full detection and decision loop (including SIEM memory and adaptive threshold optimization), and the Mitigation Agent executes the response:
 
 ```
 Network Traffic
@@ -49,25 +47,26 @@ Network Traffic
 └────────┬────────────┘
          │  FlowRecord (CSV)
          ▼
-┌─────────────────────┐
-│  Classification     │  PCA anomaly detection + ZySec LLM reasoning
-│  Agent              │  + SIEM fusion + Verification
-└────────┬────────────┘
-         │  ClassificationResult
-         ▼
+┌──────────────────────────────────────────────────────┐
+│              Classification Agent                    │
+│                                                      │
+│  ┌──────────────┐   ┌──────────────┐                 │
+│  │   ML Model   │   │  Elasticsearch│                │
+│  │  (PCA + ZySec│──▶│  / Kibana MCP│                │
+│  │   reasoning) │   │  (SIEM memory│                │
+│  └──────┬───────┘   └──────────────┘                 │
+│         │  FusionEngine (ML confidence + SIEM data)  │
+│         ▼                                            │
+│  ┌──────────────────────────────────┐                │
+│  │  Threshold Optimizer (Q-learning)│                │
+│  │  Adapts 4 thresholds every 5 min │                │
+│  └──────────────────────────────────┘                │
+│         │  ClassificationResult                      │
+└─────────┼────────────────────────────────────────────┘
+          │
+          ▼
 ┌─────────────────────┐
 │  Mitigation Agent   │  Deterministic executor — iptables / netsh
-└────────┬────────────┘
-         │  MitigationResult
-         ▼
-┌─────────────────────┐
-│  Elasticsearch /    │  Persistent audit trail, alert history,
-│  Kibana             │  Q-learning feedback source
-└─────────────────────┘
-         ↑
-┌─────────────────────┐
-│  RL Policy          │  Q-learning optimizer running every 5 min
-│  Optimizer          │  Adjusts 4 detection thresholds dynamically
 └─────────────────────┘
 ```
 
@@ -80,56 +79,53 @@ Network Traffic
 | 1 | Extract 80+ statistical features from live network traffic using CICFlowMeter | ✅ Done |
 | 2 | Detect and classify attack types using a trained PCA anomaly model | ✅ Done |
 | 3 | Reduce false positives by fusing ML confidence with SIEM historical data | ✅ Done |
-| 4 | Verify attack decisions against per-IP historical reputation | ✅ Done |
-| 5 | Generate human-readable reasoning for every decision using a local LLM (ZySec) | ✅ Done |
-| 6 | Apply proportional automated mitigation (block, rate-limit, isolate, quarantine) | ✅ Done |
-| 7 | Adapt detection thresholds autonomously using Q-learning | ✅ Done |
-| 8 | Expose all real-time data via FastAPI and a React monitoring dashboard | ✅ Done |
-| 9 | Persist a full audit trail to Elasticsearch (evidence-before-mitigation) | ✅ Done |
+| 4 | Generate human-readable reasoning for every decision using a local LLM (ZySec) | ✅ Done |
+| 5 | Apply proportional automated mitigation (block, rate-limit, isolate, quarantine) | ✅ Done |
+| 6 | Adapt detection thresholds autonomously using Q-learning | ✅ Done |
+| 7 | Expose all real-time data via FastAPI and a React monitoring dashboard | ✅ Done |
+| 8 | Persist a full audit trail to Elasticsearch (evidence-before-mitigation) | ✅ Done |
 
 ---
 
 ## 3. System Architecture
 
-ANDS is composed of **two primary agents**, a **learning layer**, and a **persistence layer** governed by a formal decision policy derived from NIST SP 800-61r2.
+ANDS is composed of **two agents**. The Classification Agent owns the full detection loop — ML model, SIEM memory (Elasticsearch/Kibana), and adaptive threshold optimizer all live inside it. The Mitigation Agent is a lean deterministic executor that receives a `ClassificationResult` and fires the appropriate response tools.
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                        ANDS Platform                             │
-│                                                                  │
-│  ┌─────────────────────────────────────────────────────────────┐ │
-│  │               Classification Agent                          │ │
-│  │                                                             │ │
-│  │   PCAIntrusionModel → FusionEngine → ReasoningEngine        │ │
-│  │          ↓                                ↓                 │ │
-│  │   SuspiciousStateTracker          ZySec / Ollama LLM        │ │
-│  │          ↓                                ↓                 │ │
-│  │              VerificationAgent (Stage 2)                    │ │
-│  │              AttackTypeModifier  (Stage 3)                  │ │
-│  └────────────────────────┬────────────────────────────────────┘ │
-│                           │ ClassificationResult                  │
-│  ┌────────────────────────▼────────────────────────────────────┐ │
-│  │               Mitigation Agent                              │ │
-│  │                                                             │ │
-│  │   strategy_map.py → tools.py (block_ip / rate_limit / ...)  │ │
-│  └────────────────────────┬────────────────────────────────────┘ │
-│                           │                                       │
-│  ┌────────────────────────▼────────────────────────────────────┐ │
-│  │        Elasticsearch / Kibana  (3 indices)                  │ │
-│  │   ands-alerts │ network_live_flows │ confirmed_attack_history│ │
-│  └────────────────────────┬────────────────────────────────────┘ │
-│                           │  metrics every 30 min                │
-│  ┌────────────────────────▼────────────────────────────────────┐ │
-│  │        RL Policy Optimizer (Q-learning, background)         │ │
-│  │    Adjusts: model_high_confidence, model_trust_floor,       │ │
-│  │             siem_corroboration_min, suspicious_escalate_count│ │
-│  └────────────────────────┬────────────────────────────────────┘ │
-│                           │ writes config/incident_policy.yaml   │
-│  ┌────────────────────────▼────────────────────────────────────┐ │
-│  │        Policy Engine (thread-safe YAML cache)               │ │
-│  │        All agents read thresholds from here at runtime      │ │
-│  └─────────────────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                          ANDS Platform                               │
+│                                                                      │
+│  ┌───────────────────────────────────────────────────────────────┐   │
+│  │                   Classification Agent                        │   │
+│  │                                                               │   │
+│  │  ┌─────────────────────────┐   ┌───────────────────────────┐ │   │
+│  │  │      ML Model           │   │  Elasticsearch / Kibana   │ │   │
+│  │  │  ┌───────────────────┐  │   │  ┌─────────────────────┐  │ │   │
+│  │  │  │  PCAIntrusionModel│  │◀──▶│  │  ands-alerts        │  │ │   │
+│  │  │  │  (anomaly scorer) │  │   │  │  network_live_flows  │  │ │   │
+│  │  │  └────────┬──────────┘  │   │  │  confirmed_attacks   │  │ │   │
+│  │  │           │ score       │   │  └─────────────────────┘  │ │   │
+│  │  │  ┌────────▼──────────┐  │   │  MCP server — push/query  │ │   │
+│  │  │  │   FusionEngine    │◀─┼───┤  alerts for corroboration │ │   │
+│  │  │  │ (ML + SIEM fusion)│  │   └───────────────────────────┘ │   │
+│  │  │  └────────┬──────────┘  │                                  │   │
+│  │  │           │             │   ┌───────────────────────────┐  │   │
+│  │  │  ┌────────▼──────────┐  │   │  Threshold Optimizer      │  │   │
+│  │  │  │  ReasoningEngine  │  │   │  (Q-learning, background) │  │   │
+│  │  │  │  ZySec / Ollama   │  │   │  Adapts 4 policy values   │  │   │
+│  │  │  └────────┬──────────┘  │   │  every 5 min via ES data  │  │   │
+│  │  │           │             │   │  → writes incident_policy │  │   │
+│  │  │  ┌────────▼──────────┐  │   │    .yaml atomically       │  │   │
+│  │  │  │AttackTypeModifier │  │   └───────────────────────────┘  │   │
+│  │  │  └───────────────────┘  │                                  │   │
+│  │  └─────────────────────────┘                                  │   │
+│  └──────────────────────────────┬────────────────────────────────┘   │
+│                                 │ ClassificationResult                │
+│  ┌──────────────────────────────▼────────────────────────────────┐   │
+│  │                    Mitigation Agent                           │   │
+│  │   strategy_map → tools (block_ip / rate_limit / isolate / …) │   │
+│  └───────────────────────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -167,25 +163,27 @@ deployments/models/pca_intrusion_detector.attack_type_centroids.json
 
 **File:** `src/agents/classification_agent/agent.py`
 
-The Classification Agent is the core detection engine. It processes one `FlowRecord` at a time through four sequential internal stages.
+The Classification Agent is the core of ANDS. It owns three internal sub-systems — the ML model pipeline, the Elasticsearch/Kibana SIEM memory, and the adaptive threshold optimizer — and processes every `FlowRecord` through three sequential decision stages before handing a `ClassificationResult` to the Mitigation Agent.
 
-#### PCAIntrusionModel
+---
 
-- Loads `deployments/models/pca_intrusion_detector.joblib`, which bundles a `StandardScaler`, a trained `PCA` transformer, a reconstruction-error threshold, and multi-class attack-type metadata.
-- **Anomaly detection:** scales and PCA-projects each flow, reconstructs it, and computes the mean squared reconstruction error. A score above the threshold signals an anomaly (attack).
-- **Attack-type classification:** uses three fallback layers in order:
-  1. A bundled multi-class model (`attack_type_model`) if present in the bundle.
-  2. Nearest centroid matching against `attack_type_centroids` stored in the bundle or a sidecar JSON file.
+#### 5.1.1 ML Model Pipeline
+
+##### PCAIntrusionModel
+
+- Loads `deployments/models/pca_intrusion_detector.joblib`, which bundles a `RobustScaler`, a trained `PCA` transformer, a reconstruction-error threshold, and multi-class attack-type metadata.
+- **Anomaly detection:** scales and PCA-projects each flow (64 principal components), reconstructs it, and computes the sum of squared reconstruction errors. A score above threshold **0.0227** signals an anomaly (attack).
+- **Attack-type classification** uses three fallback layers in order:
+  1. A bundled multi-class model (`attack_type_model`) if present.
+  2. Nearest centroid matching against `attack_type_centroids` (sidecar JSON).
   3. A `Label` column from the input CSV row if available.
-- **Model bundle keys:** `scaler`, `pca`, `threshold`, `feature_columns`, `attack_type_centroids`, `attack_classes`, `attack_type_source`, `attack_type_feature_space`.
+- **Model bundle keys:** `scaler`, `pca`, `threshold`, `feature_columns`, `attack_type_centroids`, `attack_classes`.
 
-#### FusionEngine
+##### FusionEngine
 
-- Implements the **Stage 1 decision table** from `policy.md` / NIST SP 800-61r2 §3.2.2.
-- Combines `model_confidence` and `siem_confidence + siem_alert_count` to produce `(fused_confidence, decision_source, is_suspicious)`.
-- All four thresholds (`model_high_confidence`, `model_trust_floor`, `siem_corroboration_min`, `siem_alert_count_min`) are read live from the `PolicyEngine` so RL updates propagate instantly.
+Combines the ML anomaly score with historical alert data retrieved from Elasticsearch to produce a fused confidence and a final decision:
 
-| model_confidence | siem_confidence | siem_alert_count | Decision |
+| model_confidence | ES alert confidence | ES alert count | Decision |
 |---|---|---|---|
 | < 0.50 | any | any | **BENIGN** (below trust floor) |
 | ≥ 0.86 | any | any | **ATTACK** (model_only) |
@@ -194,55 +192,88 @@ The Classification Agent is the core detection engine. It processes one `FlowRec
 | 0.50 – 0.64 | ≥ 0.80 | ≥ 3 | **ATTACK** (siem_override) |
 | 0.50 – 0.64 | < 0.80 | < 3 | **SUSPICIOUS** |
 
-#### SuspiciousStateTracker
+All four thresholds are read live from the Policy Engine so optimizer updates take effect immediately.
 
-- Tracks per-IP SUSPICIOUS decisions within a rolling time window (default: 10 minutes).
-- When a source IP accumulates `escalate_if_count` (default: 3) SUSPICIOUS decisions in the window, it triggers automatic re-evaluation with `siem_alert_count + 3`, potentially escalating to ATTACK.
-- Implements NIST §3.2.6 — pattern-based incident prioritization.
+##### SuspiciousStateTracker
 
----
+Tracks per-IP SUSPICIOUS decisions within a rolling 10-minute window. When the same IP accumulates `escalate_if_count` (default: 3) SUSPICIOUS hits, it triggers automatic re-evaluation — implementing NIST §3.2.6 pattern-based escalation.
 
-### 5.2 Verification Agent
+##### ReasoningEngine (ZySec LLM)
 
-**File:** `src/agents/classification_agent/verification_agent.py`
+Every decision is explained by **ZySec-7B**, a security-specialized LLM running locally via Ollama (`src/llms/llm_client.py`):
 
-Sits between Stage 1 (FusionEngine) and Stage 3 (attack-type modifier). Only runs when Stage 1 produces an ATTACK decision.
+1. **`assess_model_confidence`** — asks ZySec to calibrate a 0–1 confidence score from the anomaly score / threshold ratio.
+2. **`generate_reasoning`** — asks ZySec for a 2–3 sentence explanation and a list of recommended response actions.
 
-#### Score Formula
+ZySec sometimes returns prose instead of strict JSON. The parser first attempts JSON extraction, then falls back to the first 3 sentences of prose, then to a deterministic heuristic string — so the pipeline never blocks.
 
-```
-verification_score = 0.4 × ip_history_score
-                   + 0.4 × same_attack_type_score
-                   + 0.2 × recent_recurrence_score
-```
-
-Where each sub-score is normalized against saturation thresholds:
-- `ip_history_score`: saturates at 10 confirmed past attacks from the IP.
-- `same_attack_type_score`: saturates at 5 past attacks of the same type.
-- `recent_recurrence_score`: saturates at 3 attacks in the last 7 days.
-
-#### Severity Tiers
-
-| verification_score | Verdict | Severity | Permitted Actions |
-|---|---|---|---|
-| > 0.80 | Confirmed Historically Consistent | **HIGH** | block_ip, null_route, isolate, quarantine |
-| 0.50 – 0.80 | Suspicious, Partial History | **MEDIUM** | rate_limit, throttle (block downgraded) |
-| 0.20 – 0.49 | Newly Observed / Low Evidence | **LOW** | log_for_investigation + alert_soc only |
-| < 0.20 | Unknown IP / No History | **INFO** | monitor_closely only |
-
-The agent extends `ClassificationResult.reasoning` with a human-readable verification summary and stamps `verification_score`, `verification_verdict`, and `decision_source` on the result.
+| Provider | Model | Notes |
+|---|---|---|
+| `ollama` | `ZySec-7B` (default) | **Primary — local, no API key required** |
+| `anthropic` | claude-haiku-4-5 | Fallback — requires `ANTHROPIC_API_KEY` |
+| `openai` | gpt-4o-mini | Fallback — requires `OPENAI_API_KEY` |
 
 ---
 
-### 5.3 Mitigation Agent
+#### 5.1.2 Elasticsearch / Kibana (SIEM Memory)
+
+**File:** `src/agents/classification_agent/kibana_adapter.py`
+
+Elasticsearch serves as the Classification Agent's persistent memory. Three indices are maintained:
+
+| Index | Content | Used By |
+|---|---|---|
+| `network_live_flows` | Every flow result (benign + attack) | Dashboard traffic view |
+| `ands-alerts` | Attacks + suspicious decisions | FusionEngine corroboration queries, RL metrics |
+| `confirmed_attack_history` | Confirmed attacks with incident IDs | RL reward signal |
+
+The agent writes to Elasticsearch **before** calling the Mitigation Agent (evidence-before-action, NIST §3.3.2):
+
+```
+1. push_flow()              → network_live_flows       (every flow)
+2. push_confirmed_attack()  → confirmed_attack_history  (attacks only)
+3. push_alert()             → ands-alerts              (attacks + suspicious)
+4. on_attack()              → MitigationAgent.mitigate()
+```
+
+A `StubKibanaAdapter` (in-memory) is used during testing without a live Elasticsearch instance.
+
+---
+
+#### 5.1.3 Threshold Optimizer (Q-Learning)
+
+**Files:** `src/learning/rl_policy_optimizer.py`, `src/learning/optimizer_scheduler.py`, `src/core/policy_engine.py`
+
+The optimizer runs as a **background thread** inside the Classification Agent and executes one Q-learning cycle every 5 minutes, continuously tuning detection sensitivity based on real operational feedback from Elasticsearch.
+
+##### What It Optimizes
+
+| Parameter | Safe Range | Effect |
+|---|---|---|
+| `model_high_confidence` | [0.75, 0.95] | Raise → fewer model-only attack decisions |
+| `model_trust_floor` | [0.35, 0.65] | Raise → discard more low-confidence model outputs |
+| `siem_corroboration_min` | [0.55, 0.90] | Raise → require stronger ES alert evidence |
+| `suspicious_escalate_count` | [2, 6] | Raise → more SUSPICIOUS hits before escalation |
+
+##### Q-Learning Setup
+
+- **State:** 5 metrics (suspicious_rate, fp_rate, fn_rate, avg_model_confidence, avg_alert_confidence) each binned into 3 levels → 243 possible states.
+- **Actions:** 9 — ±0.01 on each of the 4 thresholds, plus no-op.
+- **Reward:** `5·TP − 8·FP − 10·FN − 4·wrong_mitigation + 3·mitigation_success`
+- **Hyperparameters:** α=0.10, γ=0.90, ε=0.10 (ε-greedy)
+- **Q-table:** persisted to `logs/rl_qtable.json` across restarts.
+
+Updated thresholds are written atomically to `config/incident_policy.yaml` (temp-file + `os.replace()`), then the **Policy Engine** (`src/core/policy_engine.py`) reloads the YAML in a thread-safe cache — the next FusionEngine call picks up the new values without any restart.
+
+---
+
+### 5.2 Mitigation Agent
 
 **File:** `src/agents/mitigation_agent/agent.py`  
 **Tools:** `src/agents/mitigation_agent/tools/tools.py`  
 **Strategy map:** `src/agents/mitigation_agent/strategy_map.py`
 
-#### Design Philosophy
-
-The Mitigation Agent is **fully deterministic** — no LLM in the hot path. The same attack type and confidence always produce the same tool sequence. This guarantees sub-second response time and predictable behavior in a live environment.
+The Mitigation Agent is **fully deterministic** — no LLM in the hot path. The same attack type and confidence always produce the same tool sequence, guaranteeing sub-second response time.
 
 #### Strategy Map
 
@@ -268,114 +299,11 @@ The Mitigation Agent is **fully deterministic** — no LLM in the hot path. The 
 | `isolate_host` | `iptables DROP INPUT + OUTPUT` | `netsh` inbound + outbound rules |
 | `alert_soc` | Logs + optional Wazuh webhook POST | Same |
 
-All tools are idempotent (block_ip skips duplicate calls), require user confirmation unless `AUTO_MITIGATE=true` or a non-interactive shell is detected, and append every action to a session-scoped audit log readable by the API.
+All tools are idempotent, require confirmation unless `AUTO_MITIGATE=true`, and append every action to a session-scoped audit log exposed by the API.
 
 ---
 
-### 5.4 RL Policy Optimizer
-
-**File:** `src/learning/rl_policy_optimizer.py`  
-**Scheduler:** `src/learning/optimizer_scheduler.py`
-
-The optimizer runs as a **background daemon** (via `OptimizerScheduler`) and executes one Q-learning cycle every 5 minutes.
-
-#### What It Optimizes
-
-Four decision thresholds in `config/incident_policy.yaml`:
-
-| Parameter | Safe Range | Effect |
-|---|---|---|
-| `model_high_confidence` | [0.75, 0.95] | Raise → fewer model-only attacks; lower → more aggressive detection |
-| `model_trust_floor` | [0.35, 0.65] | Raise → discard more low-confidence model outputs |
-| `siem_corroboration_min` | [0.55, 0.90] | Raise → require stronger SIEM evidence in medium-confidence band |
-| `suspicious_escalate_count` | [2, 6] | Raise → more SUSPICIOUS hits required before escalation |
-
-#### Q-Learning Setup
-
-- **State:** 5-dimensional discrete vector binned from operational metrics (suspicious_rate, fp_rate, fn_rate, avg_model_confidence, avg_siem_confidence) — each binned into low/med/high (243 possible states).
-- **Actions:** 9 — increment/decrement each of the 4 thresholds by ±0.01 (or ±1 for integer), plus a no-op.
-- **Reward function:** `5·TP − 8·FP − 10·FN − 4·wrong_mitigation + 3·mitigation_success − 2·analyst_override`
-- **Hyperparameters:** α=0.10, γ=0.90, ε=0.10 (ε-greedy exploration)
-- **Q-table:** persisted to `logs/rl_qtable.json` between restarts.
-- **Metrics source:** Elasticsearch (`ands-alerts` + `confirmed_attack_history` indices). Falls back to `logs/rl_decisions.jsonl` when ES is unavailable.
-
-#### YAML Write
-
-The optimizer patches only the four RL-managed keys in the YAML using an atomic temp-file + `os.replace()` to prevent corruption during concurrent access. All other policy keys (webhook URLs, retention periods, etc.) are left untouched.
-
----
-
-### 5.5 Policy Engine
-
-**File:** `src/core/policy_engine.py`
-
-Thread-safe, live-reloadable YAML configuration cache. All agents read their thresholds from the single shared `PolicyEngine` instance injected at startup. When the RL optimizer writes a new YAML, it calls `policy.reload()` — the next agent decision picks up the new values without restarting the process.
-
-Exposed properties: `model_trust_floor`, `model_high_confidence`, `siem_corroboration_min`, `siem_alert_count_min`, `suspicious_escalate_count`, `confirmed_threshold`, `suspicious_threshold`, `low_evidence_threshold`.
-
----
-
-### 5.6 LLM Reasoning Engine (ZySec)
-
-**File:** `src/agents/classification_agent/agent.py` → `ReasoningEngine`  
-**LLM Client:** `src/llms/llm_client.py`
-
-Every classification decision — attack, suspicious, or benign — is accompanied by a human-readable reasoning text generated by the **ZySec-7B** security LLM running locally via Ollama.
-
-#### Two LLM Calls per Flow
-
-1. **`assess_model_confidence`** — asks ZySec to calibrate a confidence score (0.0–1.0) from the anomaly score / threshold ratio. Replaces a fixed heuristic formula.
-2. **`generate_reasoning`** — asks ZySec to produce a 2–3 sentence explanation and a list of recommended actions for the decision.
-
-#### Output Parsing
-
-ZySec sometimes returns prose instead of strict JSON. The parser:
-1. Attempts JSON extraction (`{"confidence": ...}` / `{"reasoning": ..., "actions": [...]}`).
-2. Falls back to extracting the first 3 sentences of prose as the reasoning text.
-3. Falls back to a deterministic heuristic reasoning string if ZySec is unavailable or crashes.
-
-#### Provider Configuration
-
-The `build_llm_client()` factory in `src/llms/llm_client.py` supports three providers via `LLM_PROVIDER` env var:
-
-| Provider | Models | Notes |
-|---|---|---|
-| `ollama` | ZySec-7B (default), llama3.1, any Ollama model | **Primary — local, no API key** |
-| `anthropic` | claude-haiku-4-5 (default) | Requires `ANTHROPIC_API_KEY` |
-| `openai` | gpt-4o-mini (default) | Requires `OPENAI_API_KEY` |
-
-**This project uses `ollama` with ZySec-7B as the primary provider.** The other providers are fallback options only.
-
----
-
-### 5.7 Elasticsearch / Kibana Integration
-
-**File:** `src/agents/classification_agent/kibana_adapter.py`
-
-Three Elasticsearch indices are maintained:
-
-| Index | Content | Used For |
-|---|---|---|
-| `network_live_flows` | Every flow result (benign + attack) | Traffic monitoring dashboard, flow history |
-| `ands-alerts` | Attacks + suspicious decisions | SIEM corroboration queries, RL metrics |
-| `confirmed_attack_history` | Confirmed attacks only with incident IDs | Verification Agent IP reputation, RL reward |
-
-#### Evidence Write Order (NIST §3.3.2)
-
-The classification agent writes to Elasticsearch **before** calling the mitigation agent, preserving original evidence even if network state changes during containment:
-
-```
-1. push_flow()              → network_live_flows      (every flow)
-2. push_confirmed_attack()  → confirmed_attack_history (attacks only)
-3. push_alert()             → ands-alerts             (attacks + suspicious)
-4. on_attack()              → MitigationAgent.mitigate()
-```
-
-A `StubKibanaAdapter` (in-memory) is available for testing without an Elasticsearch instance.
-
----
-
-### 5.8 FastAPI Backend & React Dashboard
+### 5.3 FastAPI Backend & React Dashboard
 
 **Backend:** `src/api.py` — FastAPI server on port 8000  
 **Frontend:** `frontend/` — React 18 + Vite + Tailwind CSS + Recharts + Framer Motion
@@ -436,7 +364,7 @@ The threshold was chosen by sweeping 100 evenly-spaced candidate values over the
 | **AU-Precision-Recall (AUPRC)** | 0.9215 |
 | **AUROC** | 0.9261 |
 
-> **Interpretation:** The PCA anomaly detector achieves near-perfect recall (99.7%) — it misses almost no real attack. The lower precision (78.3%) reflects false positives from benign flows whose reconstruction error happens to exceed the threshold; these are filtered downstream by the FusionEngine and VerificationAgent.
+> **Interpretation:** The PCA anomaly detector achieves near-perfect recall (99.7%) — it misses almost no real attack. The lower precision (78.3%) reflects false positives from benign flows whose reconstruction error happens to exceed the threshold; these are filtered downstream by the FusionEngine (SIEM corroboration gate).
 
 #### Per Attack-Type Detection Performance
 
@@ -449,7 +377,7 @@ The threshold was chosen by sweeping 100 evenly-spaced candidate values over the
 | DoS Slowloris (standalone) | 0.027 | **1.000** | 0.052 | 0.940 | 0.092 |
 | DoS Slowhttptest (standalone) | — | — | — | 0.965 | 0.073 |
 
-> **Note on per-type low precision:** The PCA model is trained unsupervised on benign data only. For attack types with statistical overlap with benign traffic (e.g., DoS Slowloris mimics normal slow HTTP), the model flags a large portion of benign flows as anomalous, driving precision down. Recall stays high because reconstruction errors for true attack flows are reliably large. The multi-signal FusionEngine (SIEM corroboration + VerificationAgent) compensates for this in the full pipeline.
+> **Note on per-type low precision:** The PCA model is trained unsupervised on benign data only. For attack types with statistical overlap with benign traffic (e.g., DoS Slowloris mimics normal slow HTTP), the model flags a large portion of benign flows as anomalous, driving precision down. Recall stays high because reconstruction errors for true attack flows are reliably large. The multi-signal FusionEngine (SIEM corroboration via Elasticsearch) compensates for this in the full pipeline.
 
 ---
 
@@ -556,13 +484,7 @@ Stage 1: FusionEngine
   ├── low band + strong SIEM                  → ATTACK (siem_override)
   └── otherwise                               → SUSPICIOUS (monitor only)
 
-Stage 2: VerificationAgent  [only if ATTACK]
-  ├── score > 0.80  → HIGH severity    — all containment tools permitted
-  ├── score 0.50–0.80 → MEDIUM severity — block_ip downgraded to rate_limit
-  ├── score 0.20–0.49 → LOW severity   — log + alert_soc only
-  └── score < 0.20  → INFO severity   — monitor_closely only
-
-Stage 3: Attack-Type Modifier  [only if ATTACK]
+Stage 2: Attack-Type Modifier  [only if ATTACK]
   ├── DDoS + high confidence → skip rate_limit, go to null_route
   ├── PortScan               → cap at block_ip (no isolation)
   ├── BruteForce             → always add throttle_connections
@@ -577,7 +499,7 @@ Stage 4: Audit Trail  [every flow]
   └── 4. MitigationAgent.mitigate()
 ```
 
-The `decision_source` field on every `ClassificationResult` is set to one of: `model_only`, `model+siem`, `siem_override`, `verification_confirmed`, `verification_downgraded`, `insufficient_evidence`.
+The `decision_source` field on every `ClassificationResult` is set to one of: `model_only`, `model+siem`, `siem_override`, `insufficient_evidence`.
 
 ---
 
@@ -606,7 +528,7 @@ The `decision_source` field on every `ClassificationResult` is set to one of: `m
 |---|---|---|
 | PCA model training | ✅ Complete | Bundle deployed at `deployments/models/` |
 | Attack type centroids | ✅ Complete | Sidecar JSON + bundle |
-| Classification Agent (4-stage) | ✅ Complete | FusionEngine, VerificationAgent, ReasoningEngine, Modifier |
+| Classification Agent (3-stage) | ✅ Complete | FusionEngine, ReasoningEngine (ZySec), AttackTypeModifier |
 | ZySec LLM integration | ✅ Complete | With prose-tolerant parsing and heuristic fallback |
 | Mitigation Agent | ✅ Complete | 7 tools, strategy map, deterministic executor |
 | RL Policy Optimizer | ✅ Complete | Q-learning, 9 actions, ES + local log fallback |
