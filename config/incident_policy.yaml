@@ -1,7 +1,8 @@
 decision_policy:
-  model_trust_floor: 0.5
-  model_high_confidence: 0.86
-  siem_corroboration_min: 0.7
+
+  model_trust_floor: 0.5  #will be modified by the rl optimizer
+  model_high_confidence: 0.86  #will be modified by the rl optimizer
+  siem_corroboration_min: 0.   #will be modified by the rl optimizer
   siem_alert_count_min: 2
   verification:
     confirmed_threshold: 0.8
@@ -9,7 +10,11 @@ decision_policy:
     low_evidence_threshold: 0.2
   suspicious_state:
     recheck_after_minutes: 10
-    escalate_if_count: 3
+    escalate_if_count: 3   #will be modified by the rl optimizer
+
+
+
+
 retention:
   evidence_days: 90
   alert_days: 30
